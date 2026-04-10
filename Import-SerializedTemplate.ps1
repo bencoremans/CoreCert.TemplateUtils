@@ -145,97 +145,48 @@ function Import-SerializedTemplate {
         # -------------------------------------------------------------------------
 
         if ($existingTemplate -and $existingOid) {
-            # --- UPDATE PATH: both exist ---
-            Write-Verbose "Template '$srcName' exists in AD. Checking for updates..."
-            $tplEntry = $existingTemplate.GetDirectoryEntry()
-
+            # --- UPDATE PATH: template and OID both exist ---
+            # Version (revision.minor) is the authoritative change signal --
+            # same logic used by Windows CA MMC and PSPKI internally.
+            Write-Verbose "Template '$srcName' already exists in AD. Comparing versions..."
+            $tplEntry   = $existingTemplate.GetDirectoryEntry()
             $adRevision = [int]$tplEntry.Properties["revision"].Value
             $adMinor    = [int]$tplEntry.Properties["msPKI-Template-Minor-Revision"].Value
 
-            # Build a fingerprint of all content attributes from XML for comparison
-            $srcAttrs = @{}
-            foreach ($attr in $root.Attributes.Attribute) {
-                $srcAttrs[$attr.Name] = $attr.Value
-            }
-
-            # Build fingerprint from AD
-            $adAttrs = @{}
-            $contentAttrNames = @(
-                "flags","msPKI-Certificate-Application-Policy","msPKI-Certificate-Name-Flag",
-                "msPKI-Enrollment-Flag","msPKI-Minimal-Key-Size","msPKI-Private-Key-Flag",
-                "msPKI-RA-Application-Policies","msPKI-RA-Signature","msPKI-Template-Schema-Version",
-                "pKICriticalExtensions","pKIDefaultKeySpec","pKIExpirationPeriod",
-                "pKIExtendedKeyUsage","pKIKeyUsage","pKIMaxIssuingDepth","pKIOverlapPeriod"
-            )
-            foreach ($attrName in $contentAttrNames) {
-                $vals = $tplEntry.Properties[$attrName]
-                if ($vals -and $vals.Count -gt 0) {
-                    # Convert byte arrays to Base64 for comparison
-                    $v = $vals[0]
-                    if ($v -is [byte[]]) {
-                        $adAttrs[$attrName] = [Convert]::ToBase64String($v)
-                    } else {
-                        $adAttrs[$attrName] = "$v"
-                    }
-                }
-            }
-
-            # Compare version and content
-            $versionChanged = ($srcMajor -ne $adRevision) -or ($srcMinor -ne $adMinor)
-            $contentChanged = $false
-            foreach ($k in $srcAttrs.Keys) {
-                $adVal  = if ($adAttrs.ContainsKey($k)) { $adAttrs[$k] } else { "" }
-                $srcVal = $srcAttrs[$k]
-                # Normalise: LDAP returns null/empty for int attributes with value 0;
-                # treat "" and "0" as equivalent for int-type attributes.
-                $xmlAttr = $root.Attributes.Attribute | Where-Object { $_.Name -eq $k }
-                if ($xmlAttr -and $xmlAttr.Type -eq "int" -and $srcVal -eq "0" -and $adVal -eq "") {
-                    continue
-                }
-                if ($adVal -ne $srcVal) {
-                    Write-Verbose "  Attribute changed: $k"
-                    Write-Verbose "    AD:  $adVal"
-                    Write-Verbose "    Src: $srcVal"
-                    $contentChanged = $true
-                }
-            }
-
-            if (-not $versionChanged -and -not $contentChanged) {
-                Write-Verbose "Template '$srcName' is up to date (revision $adRevision.$adMinor). No update needed."
-                Write-Output "Template '$srcName' is already up to date. No changes applied."
+            if ($srcMajor -eq $adRevision -and $srcMinor -eq $adMinor) {
+                Write-Verbose "Template '$srcName' is up to date (v$adRevision.$adMinor). No update needed."
+                Write-Output "Template '$srcName' is already up to date (v$adRevision.$adMinor). No changes applied."
                 return
             }
 
-            # Apply update
-            $changeDesc = if ($versionChanged) { "version $adRevision.$adMinor -> $srcMajor.$srcMinor" } else { "content changed" }
+            $changeDesc = "v$adRevision.$adMinor -> v$srcMajor.$srcMinor"
             if ($PSCmdlet.ShouldProcess("Template '$srcName'", "Update in AD ($changeDesc)")) {
-                Write-Verbose "Applying update to '$srcName'..."
+                Write-Verbose "Applying update to '$srcName' ($changeDesc)..."
 
-                # Write all content attributes from XML
+                # Write all content attributes from the serialized source
                 foreach ($attr in $root.Attributes.Attribute) {
                     $attrName  = $attr.Name
                     $attrValue = $attr.Value
                     $attrType  = $attr.Type
 
+                    # Skip attributes managed separately below
+                    if ($attrName -in @("revision", "msPKI-Template-Minor-Revision")) { continue }
+
+                    $tplEntry.Properties[$attrName].Clear()
                     if ($attrType -eq "bytes") {
-                        $bytes = [Convert]::FromBase64String($attrValue)
-                        $tplEntry.Properties[$attrName].Clear()
-                        $tplEntry.Properties[$attrName].Add($bytes) | Out-Null
+                        $tplEntry.Properties[$attrName].Add([Convert]::FromBase64String($attrValue)) | Out-Null
                     } elseif ($attrType -eq "strings") {
-                        $tplEntry.Properties[$attrName].Clear()
                         foreach ($line in ($attrValue -split "`n")) {
                             if ($line.Trim()) { $tplEntry.Properties[$attrName].Add($line.Trim()) | Out-Null }
                         }
                     } elseif ($attrType -eq "int") {
-                        $tplEntry.Properties[$attrName].Clear()
                         $tplEntry.Properties[$attrName].Add([int]$attrValue) | Out-Null
                     } else {
-                        $tplEntry.Properties[$attrName].Clear()
                         $tplEntry.Properties[$attrName].Add($attrValue) | Out-Null
                     }
                 }
 
-                # Update version
+                # Bump version
                 $tplEntry.Properties["revision"].Clear()
                 $tplEntry.Properties["revision"].Add($srcMajor) | Out-Null
                 $tplEntry.Properties["msPKI-Template-Minor-Revision"].Clear()
