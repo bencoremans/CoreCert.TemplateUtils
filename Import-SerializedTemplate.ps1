@@ -146,22 +146,84 @@ function Import-SerializedTemplate {
 
         if ($existingTemplate -and $existingOid) {
             # --- UPDATE PATH: template and OID both exist ---
-            # Version (revision.minor) is the authoritative change signal --
-            # same logic used by Windows CA MMC and PSPKI internally.
-            Write-Verbose "Template '$srcName' already exists in AD. Comparing versions..."
+            # Detect changes via version AND content comparison:
+            #   - Version change  : revision or minor revision differs
+            #   - Content change  : one or more LDAP attributes differ
+            #     (catches manual MMC edits that don't bump the version)
+            Write-Verbose "Template '$srcName' already exists in AD. Comparing version and content..."
             $tplEntry   = $existingTemplate.GetDirectoryEntry()
             $adRevision = [int]$tplEntry.Properties["revision"].Value
             $adMinor    = [int]$tplEntry.Properties["msPKI-Template-Minor-Revision"].Value
 
-            if ($srcMajor -eq $adRevision -and $srcMinor -eq $adMinor) {
-                Write-Verbose "Template '$srcName' is up to date (v$adRevision.$adMinor). No update needed."
+            # -- Helper: normalise an LDAP property value to a canonical string for diffing --
+            function Get-AdNormalized {
+                param([System.DirectoryServices.PropertyValueCollection]$prop, [string]$type)
+                if ($null -eq $prop -or $prop.Count -eq 0) {
+                    if ($type -eq "int")   { return "0" }
+                    if ($type -eq "bytes") { return "" }
+                    return ""
+                }
+                switch ($type) {
+                    "int"     { return ([int]$prop[0]).ToString() }
+                    "bytes"   { return [Convert]::ToBase64String([byte[]]$prop[0]) }
+                    "strings" {
+                        # Multi-value: sort for stable comparison
+                        $vals = @(); foreach ($v in $prop) { $vals += $v.ToString().Trim() }
+                        return ($vals | Sort-Object) -join "|"
+                    }
+                    default   { return $prop[0].ToString().Trim() }
+                }
+            }
+
+            # -- Helper: normalise a serialized XML attribute value to the same canonical form --
+            function Get-SrcNormalized {
+                param([string]$value, [string]$type)
+                switch ($type) {
+                    "int"     { return ([int]$value).ToString() }       # "0", "-1", etc.
+                    "bytes"   { return $value.Trim() }                   # already base64
+                    "strings" {
+                        $vals = ($value -split "`n") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
+                        return ($vals | Sort-Object) -join "|"
+                    }
+                    default   { return $value.Trim() }
+                }
+            }
+
+            # Build diff list: attributes in the serialised source vs. current AD values
+            $changedAttrs = [System.Collections.Generic.List[string]]::new()
+            foreach ($attr in $root.Attributes.Attribute) {
+                $n = $attr.Name
+                if ($n -in @("revision","msPKI-Template-Minor-Revision")) { continue }
+
+                $srcNorm = Get-SrcNormalized $attr.Value $attr.Type
+                $adNorm  = Get-AdNormalized  $tplEntry.Properties[$n] $attr.Type
+
+                if ($srcNorm -ne $adNorm) {
+                    Write-Verbose "  Attribute differs: $n"
+                    Write-Verbose "    AD : $adNorm"
+                    Write-Verbose "    Src: $srcNorm"
+                    $changedAttrs.Add($n)
+                }
+            }
+
+            $versionChanged = ($srcMajor -ne $adRevision) -or ($srcMinor -ne $adMinor)
+            $contentChanged = $changedAttrs.Count -gt 0
+
+            if (-not $versionChanged -and -not $contentChanged) {
+                Write-Verbose "Template '$srcName' is identical to source (v$adRevision.$adMinor). No update needed."
                 Write-Output "Template '$srcName' is already up to date (v$adRevision.$adMinor). No changes applied."
                 return
             }
 
-            $changeDesc = "v$adRevision.$adMinor -> v$srcMajor.$srcMinor"
+            # Build human-readable description of what changed
+            $changeReasons = [System.Collections.Generic.List[string]]::new()
+            if ($versionChanged)  { $changeReasons.Add("version v$adRevision.$adMinor -> v$srcMajor.$srcMinor") }
+            if ($contentChanged)  { $changeReasons.Add("$($changedAttrs.Count) attribute(s) differ: $($changedAttrs -join ', ')") }
+            $changeDesc = $changeReasons -join "; "
+
             if ($PSCmdlet.ShouldProcess("Template '$srcName'", "Update in AD ($changeDesc)")) {
-                Write-Verbose "Applying update to '$srcName' ($changeDesc)..."
+                Write-Verbose "Applying update to '$srcName'..."
+                Write-Verbose "  Changes: $changeDesc"
 
                 # Write all content attributes from the serialized source
                 foreach ($attr in $root.Attributes.Attribute) {
@@ -169,8 +231,7 @@ function Import-SerializedTemplate {
                     $attrValue = $attr.Value
                     $attrType  = $attr.Type
 
-                    # Skip attributes managed separately below
-                    if ($attrName -in @("revision", "msPKI-Template-Minor-Revision")) { continue }
+                    if ($attrName -in @("revision","msPKI-Template-Minor-Revision")) { continue }
 
                     $tplEntry.Properties[$attrName].Clear()
                     if ($attrType -eq "bytes") {
@@ -186,14 +247,14 @@ function Import-SerializedTemplate {
                     }
                 }
 
-                # Bump version
+                # Always write version (use source version; if only content changed keep src version)
                 $tplEntry.Properties["revision"].Clear()
                 $tplEntry.Properties["revision"].Add($srcMajor) | Out-Null
                 $tplEntry.Properties["msPKI-Template-Minor-Revision"].Clear()
                 $tplEntry.Properties["msPKI-Template-Minor-Revision"].Add($srcMinor) | Out-Null
 
                 $tplEntry.CommitChanges()
-                Write-Verbose "Template '$srcName' updated: $changeDesc"
+                Write-Verbose "Template '$srcName' updated."
                 Write-Output "Template '$srcName' updated successfully ($changeDesc)."
             }
             return
@@ -241,16 +302,15 @@ function Import-SerializedTemplate {
         $newEntry.Properties["msPKI-Cert-Template-OID"].Add($srcOid) | Out-Null
         $newEntry.Properties["revision"].Add($srcMajor) | Out-Null
         $newEntry.Properties["msPKI-Template-Minor-Revision"].Add($srcMinor) | Out-Null
-        $newEntry.Properties["flags"].Add(66257) | Out-Null   # standard template flags
 
-        # Write all content attributes from XML
+        # Write all content attributes from XML (flags included -- use source value, not a hardcoded default)
         foreach ($attr in $root.Attributes.Attribute) {
             $attrName  = $attr.Name
             $attrValue = $attr.Value
             $attrType  = $attr.Type
 
-            # Skip version/OID attributes -- handled separately
-            if ($attrName -in @("revision","msPKI-Template-Minor-Revision","msPKI-Cert-Template-OID","displayName","flags")) {
+            # Skip version/OID/name -- handled separately above
+            if ($attrName -in @("revision","msPKI-Template-Minor-Revision","msPKI-Cert-Template-OID","displayName")) {
                 continue
             }
 
