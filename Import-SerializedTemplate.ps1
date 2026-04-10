@@ -11,7 +11,7 @@
     without requiring a trust relationship. The method is based on the MS-XCEP protocol
     (X.509 Certificate Enrollment Policy Protocol), which was introduced in Windows Server 2008 R2.
 
-    Note: A new unique OID is generated for each imported template. This is by design —
+    Note: A new unique OID is generated for each imported template. This is by design -
     the CX509CertificateTemplateADWritable COM interface always assigns a new OID on Commit().
     All other template settings (schema version, cryptography, EKU, subject flags, extensions)
     are preserved exactly.
@@ -19,7 +19,12 @@
     The optional -Name and -DisplayName parameters allow importing a template under a different
     name than the original. This is useful for multi-tenant or multi-forest deployments where
     the same base template needs to be deployed with a customer-specific prefix.
-    The XML on disk is never modified — the substitution happens in memory before import.
+
+    The optional -Version parameter resets the template revision to a clean starting version
+    (e.g. "100.1"), independent of the source template's version history. This is useful
+    when deploying a template to a new environment and wanting a clean version baseline.
+
+    All XML substitutions happen in memory - the XML string or file on disk is never modified.
 
 .PARAMETER XmlString
     The MS-XCEP XML string containing the exported certificate template(s).
@@ -44,27 +49,41 @@
     Only needed when the XML contains multiple templates and you want to rename
     a specific one. If omitted, the first template in the XML is used.
 
+.PARAMETER Version
+    Optional. Reset the template revision to a clean version on import.
+    Format: "major.minor" - e.g. "100.1"
+    Useful when deploying to a new environment and wanting a clean version baseline,
+    independent of the source template's version history.
+
 .EXAMPLE
-    # Basic import — original template name preserved
+    # Basic import - original template name and version preserved
     $xml = ConvertTo-SerializedTemplate -Template (Get-CertificateTemplate -Name "WebServer")
     Import-SerializedTemplate -XmlString $xml
 
 .EXAMPLE
-    # Import to a different forest DC
-    Import-SerializedTemplate -XmlString $xml -Server "dc01.partner.com"
+    # Import to a specific DC (e.g. from a non-DC machine)
+    Import-SerializedTemplate -XmlString $xml -Server "dc01.contoso.com"
 
 .EXAMPLE
     # Import with a new name (multi-tenant use case)
     Import-SerializedTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server"
 
 .EXAMPLE
+    # Import with a new name and clean version baseline
+    Import-SerializedTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server" -Version "100.1"
+
+.EXAMPLE
     # Multi-template XML: rename a specific template
     Import-SerializedTemplate -XmlString $xml -SourceName "CC-WebServer" -Name "ACME-WebServer" -DisplayName "ACME Web Server"
+
+.EXAMPLE
+    # Dry-run
+    Import-SerializedTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
 
 .NOTES
     Requires Windows 7 / Windows Server 2008 R2 or newer.
     Must be run as a user with Enterprise Administrator permissions.
-    The OID change on import is expected and by design — see description above.
+    The OID change on import is expected and by design - see description above.
 
     Original import technique by Vadims Podans (sysadmins.lv).
 
@@ -76,15 +95,19 @@ function Import-SerializedTemplate {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
         [string]$XmlString,
 
-        [string]$Server = (Get-ADDomainController -Discover -ForceDiscover -Writable).HostName[0],
+        [string]$Server = '',
 
         [string]$Name = "",
 
         [string]$DisplayName = "",
 
-        [string]$SourceName = ""
+        [string]$SourceName = "",
+
+        [ValidatePattern('^\d+\.\d+$')]
+        [string]$Version = ""
     )
 
     begin {
@@ -97,44 +120,65 @@ function Import-SerializedTemplate {
     }
 
     process {
-        # Apply in-memory name injection if -Name or -DisplayName is specified
-        if ($Name -or $DisplayName) {
+        # Apply in-memory substitutions if any override parameters are specified
+        if ($Name -or $DisplayName -or $Version) {
             [xml]$doc = $XmlString
             $ns = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
             $ns.AddNamespace("ep", "http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy")
 
-            # Determine which source template to rename
             $allCnNodes = $doc.SelectNodes("//ep:attributes/ep:commonName", $ns)
             if ($allCnNodes.Count -eq 0) { throw "No templates found in the provided XML." }
 
-            $sourceCn = if ($SourceName) {
-                $SourceName
-            } else {
-                if ($allCnNodes.Count -gt 1) {
-                    Write-Warning "XML contains $($allCnNodes.Count) templates. Renaming the first: '$($allCnNodes[0].InnerText)'. Use -SourceName to select a specific template."
+            # --- Name / DisplayName injection ---
+            if ($Name -or $DisplayName) {
+                $sourceCn = if ($SourceName) {
+                    $SourceName
+                } else {
+                    if ($allCnNodes.Count -gt 1) {
+                        Write-Warning "XML contains $($allCnNodes.Count) templates. Renaming the first: '$($allCnNodes[0].InnerText)'. Use -SourceName to select a specific template."
+                    }
+                    $allCnNodes[0].InnerText
                 }
-                $allCnNodes[0].InnerText
+
+                $newName        = if ($Name)        { $Name }        else { $sourceCn }
+                $newDisplayName = if ($DisplayName) { $DisplayName } else { $newName }
+
+                Write-Verbose "Name injection: '$sourceCn' -> Name='$newName', DisplayName='$newDisplayName'"
+
+                # Replace <commonName> in <attributes>
+                $cnNodes = $doc.SelectNodes("//ep:attributes/ep:commonName[text()='$sourceCn']", $ns)
+                foreach ($node in $cnNodes) { $node.InnerText = $newName }
+
+                # Replace <defaultName> in <oID> table (becomes display name after import)
+                $dnNodes = $doc.SelectNodes("//ep:defaultName[text()='$sourceCn']", $ns)
+                foreach ($node in $dnNodes) { $node.InnerText = $newDisplayName }
+
+                Write-Verbose "  CN nodes updated: $($cnNodes.Count), OID defaultName nodes updated: $($dnNodes.Count)"
             }
 
-            $newName        = if ($Name)        { $Name }        else { $sourceCn }
-            $newDisplayName = if ($DisplayName) { $DisplayName } else { $newName }
+            # --- Version injection ---
+            if ($Version) {
+                $versionParts = $Version -split '\.'
+                $majorRevision = $versionParts[0]
+                $minorRevision = $versionParts[1]
 
-            Write-Verbose "Renaming template in XML: '$sourceCn' -> Name='$newName', DisplayName='$newDisplayName'"
+                Write-Verbose "Version injection: -> $majorRevision.$minorRevision"
 
-            # Replace <commonName> in <attributes>
-            $cnNodes = $doc.SelectNodes("//ep:attributes/ep:commonName[text()='$sourceCn']", $ns)
-            foreach ($node in $cnNodes) { $node.InnerText = $newName }
+                $majorNodes = $doc.SelectNodes("//ep:attributes/ep:revision/ep:majorRevision", $ns)
+                $minorNodes = $doc.SelectNodes("//ep:attributes/ep:revision/ep:minorRevision", $ns)
 
-            # Replace <defaultName> in <oID> table (becomes display name after import)
-            $dnNodes = $doc.SelectNodes("//ep:defaultName[text()='$sourceCn']", $ns)
-            foreach ($node in $dnNodes) { $node.InnerText = $newDisplayName }
+                foreach ($node in $majorNodes) { $node.InnerText = $majorRevision }
+                foreach ($node in $minorNodes) { $node.InnerText = $minorRevision }
+
+                Write-Verbose "  Revision nodes updated: $($majorNodes.Count) major, $($minorNodes.Count) minor"
+            }
 
             $XmlString = $doc.OuterXml
         }
 
         try {
-            $bytes     = [System.Text.Encoding]::ASCII.GetBytes($XmlString)
-            $pol       = New-Object -ComObject X509Enrollment.CX509EnrollmentPolicyWebService
+            $bytes = [System.Text.Encoding]::ASCII.GetBytes($XmlString)
+            $pol   = New-Object -ComObject X509Enrollment.CX509EnrollmentPolicyWebService
             $pol.InitializeImport($bytes)
             $templates = @($pol.GetTemplates() | ForEach-Object { $_ })
 

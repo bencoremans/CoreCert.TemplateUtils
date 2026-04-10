@@ -1,4 +1,4 @@
-# CertTemplateUtils
+# CoreCert.TemplateUtils
 
 A PowerShell module for managing Active Directory Certificate Services (AD CS) certificate templates — export, import, compare, and update templates programmatically.
 
@@ -24,10 +24,10 @@ This module extends that approach with:
 
 ```powershell
 # From PowerShell Gallery
-Install-Module CertTemplateUtils
+Install-Module CoreCert.TemplateUtils
 
 # Or clone and import manually
-Import-Module .\CertTemplateUtils.psd1
+Import-Module .\CoreCert.TemplateUtils.psd1
 ```
 
 ## How it works
@@ -116,6 +116,7 @@ Import-SerializedTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
 | `-Name` | `string` | No | New template CN in AD. Replaces the original name. |
 | `-DisplayName` | `string` | No | New display name in AD. Defaults to `-Name` if not set. |
 | `-SourceName` | `string` | No | Original template CN to rename (multi-template XML only). |
+| `-Version` | `string` | No | Reset revision to a clean baseline. Format: `"major.minor"` e.g. `"100.1"`. Independent of source version history. |
 
 ---
 
@@ -201,7 +202,7 @@ Update-CertificateTemplate -Name "WebServer" -DesiredTemplateJson $desiredJson
 
 ```powershell
 Import-Module PSPKI
-Import-Module CertTemplateUtils
+Import-Module CoreCert.TemplateUtils
 
 # 1. Export templates from source forest
 $xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } |

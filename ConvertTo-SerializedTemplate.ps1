@@ -172,12 +172,12 @@ function ConvertTo-SerializedTemplate {
             $str + "</supersededPolicies>"
         }
         # list of CSPs
-        $CSPs = if ($temp.Settings.Cryptography.CSPList.Count -eq 0) {
+        $CSPs = if ($temp.Settings.Cryptography.ProviderList.Count -eq 0) {
             '<cryptoProviders xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
         }
         else {
             $str = "<cryptoProviders>`n"
-            $temp.Settings.Cryptography.CSPList | ForEach-Object {
+            $temp.Settings.Cryptography.ProviderList | ForEach-Object {
                 $str += "<provider>$_</provider>`n"
             }
             $str + "</cryptoProviders>"

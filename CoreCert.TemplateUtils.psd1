@@ -1,5 +1,5 @@
 @{
-    RootModule = 'CertTemplateUtils.psm1'
+    RootModule = 'CoreCert.TemplateUtils.psm1'
     ModuleVersion = '1.0.3'
     GUID = 'c8e82f8d-13d2-4a1d-91b3-24ff8b01827d'
     Author = 'Ben Coremans'
@@ -13,8 +13,8 @@
     VariablesToExport = @()
     RequiredModules = @('PSPKI')
     FileList = @(
-        'CertTemplateUtils.psd1',
-        'CertTemplateUtils.psm1',
+        'CoreCert.TemplateUtils.psd1',
+        'CoreCert.TemplateUtils.psm1',
         'Compare-TemplateAttributes.ps1',
         'ConvertTo-SerializedTemplate.ps1',
         'Get-ADCSTemplate.ps1',
