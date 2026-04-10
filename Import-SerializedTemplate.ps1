@@ -145,40 +145,122 @@ function Import-SerializedTemplate {
         # -------------------------------------------------------------------------
 
         if ($existingTemplate -and $existingOid) {
-            # --- UPDATE PATH: delegate to Update-CertificateTemplate ---
-            # Build a desired-state PSObject from the serialized XML so that
-            # Compare-TemplateAttributes + Update-CertificateTemplate can do
-            # the type-aware diff and write in one place.
-            Write-Verbose "Template '$srcName' already exists in AD. Delegating to Update-CertificateTemplate..."
+            # --- UPDATE PATH ---
+            # Compare only the XCEP attributes from the serialized XML against
+            # the matching LDAP attribute values on the existing AD object.
+            # No ADModule, no PSObject conversion, no metadata noise.
+            Write-Verbose "Template '$srcName' already exists in AD. Comparing XCEP attributes..."
 
-            # Build desired PSObject: version fields + all content attributes
-            $desired = [PSCustomObject]@{
-                revision                         = $srcMajor
-                'msPKI-Template-Minor-Revision'  = $srcMinor
+            $tplEntry   = $existingTemplate.GetDirectoryEntry()
+            $adRevision = [int]$tplEntry.Properties["revision"].Value
+            $adMinor    = [int]$tplEntry.Properties["msPKI-Template-Minor-Revision"].Value
+
+            # Normalise an LDAP PropertyValueCollection to a canonical string
+            # using the same type logic as the serialized XML (int/bytes/strings).
+            function Get-LdapNorm {
+                param([System.DirectoryServices.PropertyValueCollection]$prop, [string]$type)
+                switch ($type) {
+                    "int" {
+                        if ($null -eq $prop -or $prop.Count -eq 0) { return "0" }
+                        return ([int]$prop[0]).ToString()
+                    }
+                    "bytes" {
+                        if ($null -eq $prop -or $prop.Count -eq 0) { return "" }
+                        return [Convert]::ToBase64String([byte[]]$prop[0])
+                    }
+                    "strings" {
+                        if ($null -eq $prop -or $prop.Count -eq 0) { return "" }
+                        $vals = @($prop | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ } | Sort-Object)
+                        return $vals -join "|"
+                    }
+                    default {
+                        if ($null -eq $prop -or $prop.Count -eq 0) { return "" }
+                        return $prop[0].ToString().Trim()
+                    }
+                }
             }
+
+            # Normalise a serialized XML attribute value to the same form.
+            function Get-XcepNorm {
+                param([string]$value, [string]$type)
+                switch ($type) {
+                    "int"     { return ([int]$value).ToString() }
+                    "bytes"   { return $value.Trim() }
+                    "strings" {
+                        $vals = ($value -split "`n") |
+                                Where-Object { $_.Trim() } |
+                                ForEach-Object { $_.Trim() } |
+                                Sort-Object
+                        return $vals -join "|"
+                    }
+                    default   { return $value.Trim() }
+                }
+            }
+
+            # Diff: XCEP attrs (source of truth) vs AD
+            $changedAttrs = [System.Collections.Generic.List[string]]::new()
             foreach ($attr in $root.Attributes.Attribute) {
                 $n = $attr.Name
                 if ($n -in @("revision","msPKI-Template-Minor-Revision")) { continue }
 
-                $v = switch ($attr.Type) {
-                    "int"     { [int]$attr.Value }
-                    "bytes"   { [Convert]::FromBase64String($attr.Value) }
-                    "strings" {
-                        @(($attr.Value -split "`n") |
-                          Where-Object { $_.Trim() } |
-                          ForEach-Object { $_.Trim() })
-                    }
-                    default   { $attr.Value.Trim() }
+                $xcepNorm = Get-XcepNorm  $attr.Value $attr.Type
+                $ldapNorm = Get-LdapNorm  $tplEntry.Properties[$n] $attr.Type
+
+                if ($xcepNorm -ne $ldapNorm) {
+                    Write-Verbose "  Differs: $n"
+                    Write-Verbose "    AD : $ldapNorm"
+                    Write-Verbose "    Src: $xcepNorm"
+                    $changedAttrs.Add($n)
                 }
-                $desired | Add-Member -NotePropertyName $n -NotePropertyValue $v -Force
             }
 
-            $desiredJson = $desired | ConvertTo-Json -Depth 5
-            $updateParams = @{ Name = $srcName; DesiredTemplateJson = $desiredJson }
-            if ($Server) { $updateParams['Server'] = $Server }
-            if ($VerbosePreference -eq 'Continue') { $updateParams['Verbose'] = $true }
+            $versionChanged = ($srcMajor -ne $adRevision) -or ($srcMinor -ne $adMinor)
+            $contentChanged = $changedAttrs.Count -gt 0
 
-            Update-CertificateTemplate @updateParams
+            if (-not $versionChanged -and -not $contentChanged) {
+                Write-Verbose "Template '$srcName' matches source. No update needed."
+                Write-Output "Template '$srcName' is already up to date (v$adRevision.$adMinor). No changes applied."
+                return
+            }
+
+            $changeReasons = [System.Collections.Generic.List[string]]::new()
+            if ($versionChanged) { $changeReasons.Add("version v$adRevision.$adMinor -> v$srcMajor.$srcMinor") }
+            if ($contentChanged) { $changeReasons.Add("$($changedAttrs.Count) attribute(s): $($changedAttrs -join ', ')") }
+            $changeDesc = $changeReasons -join "; "
+
+            if ($PSCmdlet.ShouldProcess("Template '$srcName'", "Update in AD ($changeDesc)")) {
+                Write-Verbose "Applying update to '$srcName': $changeDesc"
+
+                # Write changed XCEP attributes back to AD
+                foreach ($attr in $root.Attributes.Attribute) {
+                    $n = $attr.Name
+                    if ($n -in @("revision","msPKI-Template-Minor-Revision")) { continue }
+                    # Only write attrs that are in the changed list
+                    if ($attr.Name -notin $changedAttrs) { continue }
+
+                    $tplEntry.Properties[$n].Clear()
+                    switch ($attr.Type) {
+                        "int"     { $tplEntry.Properties[$n].Add([int]$attr.Value) | Out-Null }
+                        "bytes"   { $tplEntry.Properties[$n].Add([Convert]::FromBase64String($attr.Value)) | Out-Null }
+                        "strings" {
+                            foreach ($line in ($attr.Value -split "`n")) {
+                                if ($line.Trim()) { $tplEntry.Properties[$n].Add($line.Trim()) | Out-Null }
+                            }
+                        }
+                        default   { $tplEntry.Properties[$n].Add($attr.Value.Trim()) | Out-Null }
+                    }
+                }
+
+                # Always write version from source
+                $tplEntry.Properties["revision"].Clear()
+                $tplEntry.Properties["revision"].Add($srcMajor) | Out-Null
+                $tplEntry.Properties["msPKI-Template-Minor-Revision"].Clear()
+                $tplEntry.Properties["msPKI-Template-Minor-Revision"].Add($srcMinor) | Out-Null
+
+                $tplEntry.CommitChanges()
+                Write-Verbose "Template '$srcName' updated."
+                Write-Output "Template '$srcName' updated successfully ($changeDesc)."
+            }
             return
         }
 
