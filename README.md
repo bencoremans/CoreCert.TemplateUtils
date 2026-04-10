@@ -8,9 +8,9 @@ Vadims Podans ([@Crypt32](https://github.com/Crypt32)) discovered that the COM i
 
 This module builds on that foundation with:
 
-- **Idempotent import**: `Import-SerializedTemplate` automatically detects whether a template is new (create) or already exists (diff → write only changed attributes → increment version). No separate update step needed.
+- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create) or already exists (diff → write only changed attributes → increment version). No separate update step needed.
 - **Multi-tenant name override**: import the same XML under a different name per customer/forest.
-- **No AD module required** for import and update operations — only PSPKI (for export via `ConvertTo-SerializedTemplate`) and `Get-ADCSTemplate` (for inspection via `Get-ADObject`).
+- **No AD module required** for import and update operations — only PSPKI (for export via `Export-ADCSTemplate`) and `Get-ADCSTemplate` (for inspection via `Get-ADObject`).
 
 ---
 
@@ -18,7 +18,7 @@ This module builds on that foundation with:
 
 - PowerShell 5.1 or newer
 - Windows Server 2008 R2 / Windows 7 or newer (CertEnroll COM for import)
-- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI`) — required for `ConvertTo-SerializedTemplate` and `Get-ADCSTemplate`
+- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI`) — required for `Export-ADCSTemplate` and `Get-ADCSTemplate`
 - Enterprise Administrator permissions (templates are stored in the AD Configuration partition)
 
 ---
@@ -37,11 +37,11 @@ Import-Module .\CoreCert.TemplateUtils.psd1
 
 ## How it works
 
-### Export (`ConvertTo-SerializedTemplate`)
+### Export (`Export-ADCSTemplate`)
 
 Reads a template object via PSPKI's `Get-CertificateTemplate` and serializes it to an **MS-XCEP-compatible XML string**. The XML contains all template settings: cryptography, validity, EKU, subject flags, extensions, key archival options, and RA requirements.
 
-### Import / Update (`Import-SerializedTemplate`)
+### Import / Update (`Import-ADCSTemplate`)
 
 A single function that handles the full lifecycle:
 
@@ -60,24 +60,24 @@ Use `-Name` and `-DisplayName` to override the template identity in memory befor
 
 ```powershell
 # Same XML, different name per customer
-Import-SerializedTemplate -XmlString $xml -Name "ACME-WebServer"    -DisplayName "ACME Web Server"
-Import-SerializedTemplate -XmlString $xml -Name "CONTOSO-WebServer" -DisplayName "Contoso Web Server"
+Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer"    -DisplayName "ACME Web Server"
+Import-ADCSTemplate -XmlString $xml -Name "CONTOSO-WebServer" -DisplayName "Contoso Web Server"
 ```
 
 ---
 
 ## Functions
 
-### `ConvertTo-SerializedTemplate`
+### `Export-ADCSTemplate`
 
 Exports one or more certificate template objects to an MS-XCEP XML string.
 
 ```powershell
 # Export a single template
-$xml = Get-CertificateTemplate -Name "CC-WebServer" | ConvertTo-SerializedTemplate
+$xml = Get-CertificateTemplate -Name "CC-WebServer" | Export-ADCSTemplate
 
 # Export multiple templates (all CC-* templates)
-$xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } | ConvertTo-SerializedTemplate
+$xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } | Export-ADCSTemplate
 
 # Save to file (version control friendly)
 $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
@@ -91,25 +91,25 @@ $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
 
 ---
 
-### `Import-SerializedTemplate`
+### `Import-ADCSTemplate`
 
 Imports certificate templates from MS-XCEP XML into Active Directory — creates if new, updates if already present.
 
 ```powershell
 # Basic import — original name preserved
-Import-SerializedTemplate -XmlString $xml
+Import-ADCSTemplate -XmlString $xml
 
 # Import to a specific DC
-Import-SerializedTemplate -XmlString $xml -Server "dc01.contoso.com"
+Import-ADCSTemplate -XmlString $xml -Server "dc01.contoso.com"
 
 # Import with a new name (multi-tenant)
-Import-SerializedTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server"
+Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server"
 
 # Version control: start at a clean baseline version
-Import-SerializedTemplate -XmlString $xml -Name "CC-WebServer" -Version "100.1"
+Import-ADCSTemplate -XmlString $xml -Name "CC-WebServer" -Version "100.1"
 
 # Dry-run (no writes)
-Import-SerializedTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
+Import-ADCSTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
 ```
 
 **Update behaviour on re-import:**
@@ -120,7 +120,7 @@ When a template with the same name already exists in AD, the function compares a
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `-XmlString` | `string` | Yes | MS-XCEP XML from `ConvertTo-SerializedTemplate` |
+| `-XmlString` | `string` | Yes | MS-XCEP XML from `Export-ADCSTemplate` |
 | `-Name` | `string` | No | New template CN in AD. Overrides original name; mints a new OID. |
 | `-DisplayName` | `string` | No | New display name in AD. Overrides original; mints a new OID. |
 | `-Version` | `string` | No | Version as `"major.minor"` (e.g. `"100.1"`). Overrides source version. |
@@ -133,7 +133,7 @@ When a template with the same name already exists in AD, the function compares a
 
 Reads template properties directly from the AD Configuration partition. Useful for inspection, ACL review, and listing all templates in AD.
 
-> **Note:** This function requires the ActiveDirectory module (`RSAT` or `ActiveDirectory` PowerShell module), unlike `Import-SerializedTemplate`.
+> **Note:** This function requires the ActiveDirectory module (`RSAT` or `ActiveDirectory` PowerShell module), unlike `Import-ADCSTemplate`.
 
 ```powershell
 # List all templates
@@ -163,19 +163,19 @@ ConvertFrom-SddlString -Sddl $t.nTSecurityDescriptor.Sddl -Type ActiveDirectoryR
 
 ---
 
-### `Remove-CertTemplateFromAD`
+### `Remove-ADCSTemplate`
 
 Removes a certificate template and its OID registration from AD.
 
 ```powershell
 # Remove (prompts for confirmation)
-Remove-CertTemplateFromAD -Name "CC-WebServer"
+Remove-ADCSTemplate -Name "CC-WebServer"
 
 # Remove without confirmation
-Remove-CertTemplateFromAD -Name "CC-WebServer" -Confirm:$false
+Remove-ADCSTemplate -Name "CC-WebServer" -Confirm:$false
 
 # Dry-run
-Remove-CertTemplateFromAD -Name "CC-WebServer" -WhatIf
+Remove-ADCSTemplate -Name "CC-WebServer" -WhatIf
 ```
 
 **Parameters:**
@@ -196,29 +196,29 @@ Import-Module CoreCert.TemplateUtils
 
 # 1. Export templates from source forest (or from manually created templates in AD)
 $xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } |
-       ConvertTo-SerializedTemplate
+       Export-ADCSTemplate
 
 # Save for version control
 $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
 
 # 2. Import into target forest — same name
-Import-SerializedTemplate -XmlString $xml -Server "dc01.target.com"
+Import-ADCSTemplate -XmlString $xml -Server "dc01.target.com"
 
 # 3. Or import with a customer-specific name
-Import-SerializedTemplate -XmlString $xml `
+Import-ADCSTemplate -XmlString $xml `
     -Name "ACME-WebServer" `
     -DisplayName "ACME Web Server" `
     -Server "dc01.acme.com"
 
 # 4. Re-import after updating the source template — automatically updates or no-ops
-Import-SerializedTemplate -XmlString $updatedXml -Name "ACME-WebServer" -Server "dc01.acme.com"
+Import-ADCSTemplate -XmlString $updatedXml -Name "ACME-WebServer" -Server "dc01.acme.com"
 
 # 5. Inspect result
 Get-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com" |
     Select-Object Name, DisplayName, Created, Modified
 
 # 6. Clean up (e.g. after a test or replacement)
-Remove-CertTemplateFromAD -Name "ACME-WebServer" -Server "dc01.acme.com"
+Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
 ```
 
 ---

@@ -29,15 +29,15 @@
 
 .EXAMPLE
     # Remove a template completely (template object + OID entry)
-    Remove-CertTemplateFromAD -Name "ACME-WebServer"
+    Remove-ADCSTemplate -Name "ACME-WebServer"
 
 .EXAMPLE
     # Remove from a specific DC and domain
-    Remove-CertTemplateFromAD -Name "ACME-WebServer" -Server "dc01.contoso.com" -Domain "DC=contoso,DC=com"
+    Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.contoso.com" -Domain "DC=contoso,DC=com"
 
 .EXAMPLE
     # Dry-run
-    Remove-CertTemplateFromAD -Name "ACME-WebServer" -WhatIf
+    Remove-ADCSTemplate -Name "ACME-WebServer" -WhatIf
 
 .NOTES
     Must be run as Enterprise Administrator.
@@ -46,7 +46,7 @@
 .LINK
     https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/
 #>
-function Remove-CertTemplateFromAD {
+function Remove-ADCSTemplate {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory = $true)]

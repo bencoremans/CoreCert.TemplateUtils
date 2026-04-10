@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Imports a serialized certificate template (from ConvertTo-SerializedTemplate) into Active Directory.
+    Imports a serialized certificate template (from Export-ADCSTemplate) into Active Directory.
 
 .DESCRIPTION
     Imports a certificate template from XML into Active Directory.
@@ -18,7 +18,7 @@
     When overriding Name or DisplayName, a new OID is minted to avoid conflicts.
 
 .PARAMETER XmlString
-    The serialized template XML, as produced by ConvertTo-SerializedTemplate.
+    The serialized template XML, as produced by Export-ADCSTemplate.
 
 .PARAMETER Name
     Optional. Override the template CN. Forces a new OID.
@@ -36,21 +36,21 @@
     Optional. Domain DN. Auto-discovered if not specified.
 
 .EXAMPLE
-    $xml = ConvertTo-SerializedTemplate -Template (Get-CertificateTemplate "CC-WebServer")
-    Import-SerializedTemplate -XmlString $xml
+    $xml = Export-ADCSTemplate -Template (Get-CertificateTemplate "CC-WebServer")
+    Import-ADCSTemplate -XmlString $xml
 
 .EXAMPLE
-    Import-SerializedTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server" -Version "100.1"
+    Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server" -Version "100.1"
 
 .EXAMPLE
     # Re-import an updated source template -- will detect change and apply update
-    Import-SerializedTemplate -XmlString $xml -Name "CC-WebServer"
+    Import-ADCSTemplate -XmlString $xml -Name "CC-WebServer"
 
 .NOTES
     Requires Enterprise Administrator rights.
     LDAP attribute mapping is based on msPKI-* schema attributes defined in MS-ADSC.
 #>
-function Import-SerializedTemplate {
+function Import-ADCSTemplate {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory = $true)]
@@ -267,7 +267,7 @@ function Import-SerializedTemplate {
         if (-not $existingTemplate -and $existingOid) {
             # --- ORPHAN OID: template gone but OID remains ---
             $oidEntry = $existingOid.GetDirectoryEntry()
-            throw "Orphan OID detected for '$srcName'. The OID entry exists (DN: $($oidEntry.distinguishedName)) but the template object does not. Run Remove-CertTemplateFromAD -Name '$srcName' to clean up, then retry."
+            throw "Orphan OID detected for '$srcName'. The OID entry exists (DN: $($oidEntry.distinguishedName)) but the template object does not. Run Remove-ADCSTemplate -Name '$srcName' to clean up, then retry."
         }
 
         # -------------------------------------------------------------------------
