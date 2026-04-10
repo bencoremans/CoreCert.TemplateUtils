@@ -49,8 +49,19 @@ function Export-ADCSTemplate {
         throw "The PSPKI module is required for Export-ADCSTemplate. Run: Install-Module PSPKI -AllowClobber"
     }
 
-    if ($Template.templatePSPKI.Name.count -lt 1 -and $Template.templateADO.Name.count -lt 1) {
+    # Normalize to array for consistent iteration
+    if ($Template -is [hashtable] -or ($Template.PSObject.Properties.Name -contains 'templatePSPKI')) {
+        $Template = @($Template)
+    }
+
+    if ($Template.Count -lt 1) {
         throw "At least one template must be specified in the 'Template' parameter."
+    }
+
+    foreach ($t in $Template) {
+        if (-not $t.templatePSPKI -or -not $t.templateADO) {
+            throw "Each template entry must contain 'templatePSPKI' and 'templateADO' keys."
+        }
     }
 
     $ErrorActionPreference = "Stop"

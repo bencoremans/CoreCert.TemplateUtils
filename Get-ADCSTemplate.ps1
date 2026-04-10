@@ -1,44 +1,50 @@
 <#
 .SYNOPSIS
-Returns the properties of either a single or all Active Directory Certificate Template(s).
-.DESCRIPTION
-Returns the properties of either a single or list of Active Directory Certificate Template(s)
-depending on whether a Name parameter was passed.
-.PARAMETER Name
-Name of an AD CS template to retrieve.
-.PARAMETER Server
-FQDN of Active Directory Domain Controller to target for the operation.
-When not specified it will search for the nearest Domain Controller.
-.EXAMPLE
-PS C:\> Get-ADCSTemplate
-.EXAMPLE
-PS C:\> Get-ADCSTemplate -Name PowerShellCMS
-.EXAMPLE
-PS C:\> Get-ADCSTemplate | Sort-Object Name | ft Name, Created, Modified
-.EXAMPLE
-PS C:\> ###View template permissions
-(Get-ADCSTemplate pscms).nTSecurityDescriptor
-(Get-ADCSTemplate pscms).nTSecurityDescriptor.Sddl
-(Get-ADCSTemplate pscms).nTSecurityDescriptor.Access
-ConvertFrom-SddlString -Sddl (Get-ADCSTemplate pscms).nTSecurityDescriptor.sddl -Type ActiveDirectoryRights
-.NOTES
-Requires Enterprise Administrator permissions, since this touches the AD Configuration partition.
+    Returns the properties of either a single or all Active Directory Certificate Template(s).
 
-The original function is made by Ashley McGlone (GoateePFE):
-https://github.com/GoateePFE/ADCSTemplate
+.DESCRIPTION
+    Returns the properties of either a single or list of Active Directory Certificate Template(s)
+    depending on whether a Name parameter was passed.
+
+    Uses System.DirectoryServices directly — no ActiveDirectory PowerShell module required.
+
+.PARAMETER Name
+    Name of an AD CS template to retrieve.
+
+.PARAMETER Server
+    FQDN of Active Directory Domain Controller to target for the operation.
+    When not specified it will search for the nearest Domain Controller.
+
+.EXAMPLE
+    PS C:\> Get-ADCSTemplate
+
+.EXAMPLE
+    PS C:\> Get-ADCSTemplate -Name "CC-WebServer"
+
+.EXAMPLE
+    PS C:\> Get-ADCSTemplate | Sort-Object Name | Format-Table Name, Created, Modified
+
+.EXAMPLE
+    # Inspect ACLs
+    $t = Get-ADCSTemplate -Name "CC-WebServer"
+    $t.nTSecurityDescriptor
+
+.NOTES
+    Requires Enterprise Administrator permissions, since this touches the AD Configuration partition.
+    No ActiveDirectory module dependency — uses System.DirectoryServices only.
 #>
 function Get-ADCSTemplate {
     [CmdletBinding()]
     param(
-        [parameter(Position=0)]
+        [parameter(Position = 0)]
         [string]$Name,
         [string]$Server = ""
     )
 
     begin {
         try {
-            $rootDseParams = if ($Server) { @{ Server = $Server } } else { @{} }
-            $ConfigNC = $((Get-ADRootDSE @rootDseParams).configurationNamingContext)
+            $rootDse = if ($Server) { [ADSI]"LDAP://$Server/RootDSE" } else { [ADSI]"LDAP://RootDSE" }
+            $ConfigNC = $rootDse.configurationNamingContext.Value
             if (-not $ConfigNC) {
                 Write-Error "Unable to retrieve Configuration Naming Context."
                 return
@@ -52,22 +58,57 @@ function Get-ADCSTemplate {
 
     process {
         try {
+            $ldapPrefix = if ($Server) { "LDAP://$Server/" } else { "LDAP://" }
+
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher
+            $searcher.SearchRoot = [ADSI]"${ldapPrefix}${TemplatePath}"
+
             if ($PSBoundParameters.ContainsKey('Name')) {
-                $LDAPFilter = "(&(objectClass=pKICertificateTemplate)(Name=$Name))"
+                $searcher.Filter = "(&(objectClass=pKICertificateTemplate)(cn=$Name))"
             } else {
-                $LDAPFilter = '(objectClass=pKICertificateTemplate)'
+                $searcher.Filter = "(objectClass=pKICertificateTemplate)"
             }
 
-            $adParams = if ($Server) { @{ Server = $Server } } else { @{} }
-            $templates = Get-ADObject -SearchScope Subtree -SearchBase $TemplatePath -LDAPFilter $LDAPFilter -Properties * @adParams
-            if (-not $templates) {
+            $searcher.SearchScope = "OneLevel"
+
+            # Load all properties
+            $searcher.PropertiesToLoad.Clear()
+
+            $results = $searcher.FindAll()
+
+            if ($results.Count -eq 0) {
                 if ($Name) {
                     Write-Warning "No templates found with Name '$Name'."
                 } else {
                     Write-Warning "No certificate templates found."
                 }
+                return
             }
-            return $templates
+
+            foreach ($result in $results) {
+                $entry = $result.GetDirectoryEntry()
+
+                # Build a PSCustomObject with all properties for easy consumption
+                $props = [ordered]@{}
+                foreach ($propName in $entry.Properties.PropertyNames) {
+                    $val = $entry.Properties[$propName]
+                    if ($val.Count -eq 1) {
+                        $props[$propName] = $val[0]
+                    } elseif ($val.Count -gt 1) {
+                        $props[$propName] = @($val | ForEach-Object { $_ })
+                    } else {
+                        $props[$propName] = $null
+                    }
+                }
+
+                # Add friendly aliases
+                $obj = [PSCustomObject]$props
+                $obj | Add-Member -NotePropertyName "Name"     -NotePropertyValue $entry.Properties["cn"][0]          -Force
+                $obj | Add-Member -NotePropertyName "Created"  -NotePropertyValue $entry.Properties["whenCreated"][0] -Force
+                $obj | Add-Member -NotePropertyName "Modified" -NotePropertyValue $entry.Properties["whenChanged"][0] -Force
+
+                $obj
+            }
         } catch {
             Write-Error "An error occurred while retrieving certificate templates: $_"
         }

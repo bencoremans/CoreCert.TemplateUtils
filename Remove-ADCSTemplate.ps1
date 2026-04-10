@@ -92,7 +92,7 @@ function Remove-ADCSTemplate {
             }
         } else {
             Write-Warning "Template '$Name' not found in Certificate Templates container."
-            $templateOid = $null
+            return
         }
 
         # --- Step 2: Remove OID entry ---
