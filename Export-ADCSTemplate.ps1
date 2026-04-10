@@ -45,6 +45,10 @@ function Export-ADCSTemplate {
         $Template
     )
 
+    if (-not (Get-Module -Name PSPKI -ErrorAction SilentlyContinue)) {
+        throw "The PSPKI module is required for Export-ADCSTemplate. Run: Install-Module PSPKI -AllowClobber"
+    }
+
     if ($Template.templatePSPKI.Name.count -lt 1 -and $Template.templateADO.Name.count -lt 1) {
         throw "At least one template must be specified in the 'Template' parameter."
     }

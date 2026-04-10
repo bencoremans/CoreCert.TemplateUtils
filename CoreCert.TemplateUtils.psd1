@@ -20,7 +20,7 @@
         'Remove-ADCSTemplate.ps1',
         'README.md'
     )
-    RequiredModules   = @('PSPKI')
+    RequiredModules   = @()
     AliasesToExport   = @()
     VariablesToExport = @()
     FormatsToProcess  = @()
