@@ -1,234 +1,229 @@
 # CoreCert.TemplateUtils
 
-A PowerShell module for managing Active Directory Certificate Services (AD CS) certificate templates — export, import, compare, and update templates programmatically.
+PowerShell module voor het beheren van AD CS-certificaatsjablonen: exporteren naar portable XML, idempotent importeren/updaten, multi-tenant naam-override en opruimen — zonder AD-module-dependency voor import/update.
 
-## Background
+## Achtergrond
 
-Until Windows Server 2008 R2 there was no supported way to transfer certificate templates between AD forests out-of-band (without a trust relationship). Windows Server 2008 R2 introduced the [MS-XCEP](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/) protocol (X.509 Certificate Enrollment Policy Protocol) as part of the Certificate Enrollment Web Services role.
+Vadims Podans ([@Crypt32](https://github.com/Crypt32)) ontdekte dat de COM-interfaces van MS-XCEP hergebruikt kunnen worden om certificaatsjablonen te exporteren naar een portable XML-formaat en te importeren in een AD-forest zonder forestvertrouwen. Zijn aanpak is gedocumenteerd in [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx).
 
-**Vadims Podans** ([@Crypt32](https://github.com/Crypt32)) discovered that the same COM interfaces used by MS-XCEP can be reused to export certificate templates to a portable XML format and import them into any AD forest. His technique is documented in [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx) and forms the foundation of this module.
+Deze module bouwt op dat fundament met:
 
-This module extends that approach with:
-- A PowerShell-native implementation (`ConvertTo-SerializedTemplate` / `Import-SerializedTemplate`)
-- **Multi-tenant support**: import a template under a different name/displayname (`-Name` / `-DisplayName`)
-- Template comparison (`Compare-TemplateAttributes`) and in-place update (`Update-CertificateTemplate`)
+- **Idempotente import**: `Import-SerializedTemplate` detecteert automatisch of een sjabloon nieuw is (aanmaken) of al bestaat (diff → alleen gewijzigde attributen schrijven → versienummer ophogen). Geen aparte update-stap nodig.
+- **Multi-tenant naam-override**: dezelfde XML importeren onder een andere naam per klant/forest.
+- **Geen AD-module vereist** voor import- en updateoperaties — alleen PSPKI (voor export via `ConvertTo-SerializedTemplate`) en `Get-ADCSTemplate` (voor inspectie via `Get-ADObject`).
 
-## Prerequisites
+---
 
-- PowerShell 5.1 or newer
-- Windows Server 2008 R2 / Windows 7 or newer (for import functionality)
-- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI`) — required for `ConvertTo-SerializedTemplate` and `Get-ADCSTemplate`
-- Enterprise Administrator permissions (templates are stored in the AD Configuration partition)
+## Vereisten
 
-## Installation
+- PowerShell 5.1 of nieuwer
+- Windows Server 2008 R2 / Windows 7 of nieuwer (CertEnroll COM voor import)
+- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI`) — vereist voor `ConvertTo-SerializedTemplate` en `Get-ADCSTemplate`
+- Enterprise Administrator-rechten (sjablonen staan in de AD Configuration-partitie)
+
+---
+
+## Installatie
 
 ```powershell
-# From PowerShell Gallery
+# Via PowerShell Gallery
 Install-Module CoreCert.TemplateUtils
 
-# Or clone and import manually
+# Of handmatig klonen en importeren
 Import-Module .\CoreCert.TemplateUtils.psd1
 ```
 
-## How it works
+---
 
-### Export
+## Hoe het werkt
 
-`ConvertTo-SerializedTemplate` reads a certificate template object (via PSPKI's `Get-CertificateTemplate`) and serializes it to a **MS-XCEP compatible XML string**. The XML contains all template settings: cryptography, validity, EKU, subject flags, extensions, key archival, RA requirements, and more.
+### Export (`ConvertTo-SerializedTemplate`)
 
-The serialization follows the [MS-XCEP XML schema](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/3afd5f86-9e16-4cc9-9c34-9a048a2aeef0) and the [MS-CRTD certificate template structure](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/).
+Leest een sjabloonobject via PSPKI's `Get-CertificateTemplate` en serialiseert het naar een **MS-XCEP-compatibele XML-string**. De XML bevat alle sjablooninstellingen: cryptografie, geldigheid, EKU, onderwerpvlaggen, extensies, sleutelarchiefopties en RA-vereisten.
 
-### Import
+### Import / Update (`Import-SerializedTemplate`)
 
-`Import-SerializedTemplate` uses two CertEnroll COM interfaces:
+Eén functie die de volledige levenscyclus afhandelt:
 
-1. **`CX509EnrollmentPolicyWebService`** (`IX509EnrollmentPolicyServer`) — initialized with the XCEP XML bytes via `InitializeImport()`, then returns `IX509CertificateTemplate` objects via `GetTemplates()`
-2. **`CX509CertificateTemplateADWritable`** (`IX509CertificateTemplateWritable`) — initialized with the template object, then committed to AD via `Commit()`
+| Situatie | Gedrag |
+|----------|--------|
+| Sjabloon bestaat **niet** | Nieuw aanmaken via directe LDAP-schrijfoperatie + OID-registratie |
+| Sjabloon **bestaat** (zelfde naam/OID) | XCEP-attributen vergelijken met AD; alleen gewijzigde attributen schrijven; versienummer ophogen |
+| Sjabloon **niet gevonden**, OID **wel** | Orphan OID-fout met opruiminstructie |
+| Geen wijzigingen | No-op (niets schrijven) |
 
-This is the **only supported method** for importing certificate templates programmatically into AD without requiring a forest trust.
+De update-path gebruikt directe `System.DirectoryServices`-LDAP-operaties — geen AD-module nodig.
 
-> **Note on OIDs:** Each imported template receives a **new OID** generated by `Commit()`. This is by design — the COM interface never reuses OIDs. All other settings (schema version, cryptography, EKU, subject flags, extensions) are preserved exactly. Certificates already issued against the original OID are unaffected.
+### Naam-override (multi-tenant / multi-forest)
 
-### Multi-tenant / multi-forest name override
-
-When deploying the same base template to multiple customers or forests, you often need a different template name per environment (e.g. `ACME-WebServer` instead of `CC-WebServer`). The `-Name` and `-DisplayName` parameters perform an **in-memory XML substitution** before the template is passed to the COM interface — the XML file on disk is never modified.
+Via `-Name` en `-DisplayName` wordt de XML in geheugen overschreven vóór import. Het bronbestand op disk blijft ongewijzigd. Bij naam- of displayname-override wordt altijd een nieuwe OID gemunt om conflicten te voorkomen.
 
 ```powershell
-# Same XML, different name per customer
+# Dezelfde XML, andere naam per klant
 Import-SerializedTemplate -XmlString $xml -Name "ACME-WebServer"    -DisplayName "ACME Web Server"
 Import-SerializedTemplate -XmlString $xml -Name "CONTOSO-WebServer" -DisplayName "Contoso Web Server"
 ```
 
 ---
 
-## Functions
+## Functies
 
 ### `ConvertTo-SerializedTemplate`
 
-Exports one or more certificate template objects to an MS-XCEP XML string.
+Exporteert een of meer sjabloonobjecten naar een MS-XCEP XML-string.
 
 ```powershell
-# Export a single template
-$xml = Get-CertificateTemplate -Name "WebServer" | ConvertTo-SerializedTemplate
+# Eén sjabloon exporteren
+$xml = Get-CertificateTemplate -Name "CC-WebServer" | ConvertTo-SerializedTemplate
 
-# Export multiple templates
+# Meerdere sjablonen exporteren (alle CC-* sjablonen)
 $xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } | ConvertTo-SerializedTemplate
 
-# Save to file
-$xml | Set-Content -Path "C:\Templates\CC-Templates.xml" -Encoding ASCII
+# Opslaan als bestand (versiebeheervriendelijk)
+$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
 ```
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-Template` | `CertificateTemplate[]` | Yes | Template object(s) from `Get-CertificateTemplate` |
+| Parameter | Type | Verplicht | Beschrijving |
+|-----------|------|-----------|--------------|
+| `-Template` | `CertificateTemplate[]` | Ja | Sjabloonobject(en) van `Get-CertificateTemplate` (PSPKI) |
 
 ---
 
 ### `Import-SerializedTemplate`
 
-Imports certificate templates from an MS-XCEP XML string into Active Directory.
+Importeert sjablonen vanuit MS-XCEP XML naar Active Directory — aanmaken als nieuw, updaten als bestaand.
 
 ```powershell
-# Basic import — original name preserved
+# Basisimport — originele naam behouden
 Import-SerializedTemplate -XmlString $xml
 
-# Import to a specific DC (e.g. from a non-DC machine)
+# Importeren naar specifieke DC
 Import-SerializedTemplate -XmlString $xml -Server "dc01.contoso.com"
 
-# Import with a new name (multi-tenant)
+# Importeren met nieuwe naam (multi-tenant)
 Import-SerializedTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server"
 
-# Multi-template XML: rename a specific template
-Import-SerializedTemplate -XmlString $xml -SourceName "CC-WebServer" -Name "ACME-WebServer" -DisplayName "ACME Web Server"
+# Versiebeheer: beginnen bij een schone versie
+Import-SerializedTemplate -XmlString $xml -Name "CC-WebServer" -Version "100.1"
 
-# Dry-run
+# Dry-run (geen schrijfoperaties)
 Import-SerializedTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
 ```
 
+**Gedrag bij re-import (update):**
+
+Wanneer een sjabloon met dezelfde naam al bestaat in AD, vergelijkt de functie alle XCEP-attributen met de AD-waarden. Alleen gewijzigde attributen worden geschreven; het versienummer (revision) wordt opgehoogd. Is er niets gewijzigd, dan is de operatie een no-op.
+
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-XmlString` | `string` | Yes | MS-XCEP XML from `ConvertTo-SerializedTemplate` |
-| `-Server` | `string` | No | Target DC FQDN. Defaults to nearest writable DC. |
-| `-Name` | `string` | No | New template CN in AD. Replaces the original name. |
-| `-DisplayName` | `string` | No | New display name in AD. Defaults to `-Name` if not set. |
-| `-SourceName` | `string` | No | Original template CN to rename (multi-template XML only). |
-| `-Version` | `string` | No | Reset revision to a clean baseline. Format: `"major.minor"` e.g. `"100.1"`. Independent of source version history. |
+| Parameter | Type | Verplicht | Beschrijving |
+|-----------|------|-----------|--------------|
+| `-XmlString` | `string` | Ja | MS-XCEP XML van `ConvertTo-SerializedTemplate` |
+| `-Name` | `string` | Nee | Nieuwe sjabloon-CN in AD. Overschrijft de originele naam; mingt een nieuwe OID. |
+| `-DisplayName` | `string` | Nee | Nieuwe weergavenaam in AD. Overschrijft origineel; mingt een nieuwe OID. |
+| `-Version` | `string` | Nee | Versie als `"major.minor"` (bijv. `"100.1"`). Overschrijft bronversie. |
+| `-Server` | `string` | Nee | Doel-DC FQDN. Standaard: dichtstbijzijnde beschrijfbare DC. |
+| `-Domain` | `string` | Nee | Domein-DN. Wordt automatisch ontdekt als niet opgegeven. |
 
 ---
 
 ### `Get-ADCSTemplate`
 
-Returns certificate template properties directly from the AD Configuration partition, without requiring PSPKI.
+Leest sjablooneigenschappen rechtstreeks uit de AD Configuration-partitie. Handig voor inspectie, ACL-controle en het ophalen van een overzicht van alle sjablonen in AD.
+
+> **Let op:** Deze functie vereist de ActiveDirectory-module (`RSAT` of `ActiveDirectory` PowerShell module), in tegenstelling tot `Import-SerializedTemplate`.
 
 ```powershell
-# All templates
+# Alle sjablonen
 Get-ADCSTemplate
 
-# Specific template
-Get-ADCSTemplate -Name "WebServer"
+# Specifiek sjabloon
+Get-ADCSTemplate -Name "CC-WebServer"
 
-# From a specific DC
+# Van een specifieke DC
 Get-ADCSTemplate -Server "dc01.contoso.com"
 
-# Sort and display
+# Gesorteerd overzicht
 Get-ADCSTemplate | Sort-Object Name | Format-Table Name, Created, Modified
 
-# View ACLs
-$t = Get-ADCSTemplate -Name "WebServer"
+# ACL bekijken
+$t = Get-ADCSTemplate -Name "CC-WebServer"
 $t.nTSecurityDescriptor.Access
 ConvertFrom-SddlString -Sddl $t.nTSecurityDescriptor.Sddl -Type ActiveDirectoryRights
 ```
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-Name` | `string` | No | Template CN to retrieve. Returns all templates if omitted. |
-| `-Server` | `string` | No | Target DC FQDN. Defaults to nearest DC. |
+| Parameter | Type | Verplicht | Beschrijving |
+|-----------|------|-----------|--------------|
+| `-Name` | `string` | Nee | Sjabloon-CN. Geeft alle sjablonen terug als weggelaten. |
+| `-Server` | `string` | Nee | Doel-DC FQDN. Standaard: dichtstbijzijnde DC. |
 
 ---
 
-### `Compare-TemplateAttributes`
+### `Remove-CertTemplateFromAD`
 
-Compares two certificate template objects and returns a hashtable of differences. Useful for drift detection and IaC workflows.
+Verwijdert een sjabloon en de bijbehorende OID-registratie uit AD.
 
 ```powershell
-$current = Get-CertificateTemplate -Name "WebServer"
-$desired = Get-ADCSTemplate -Name "WebServer-Desired"
+# Verwijderen (vraagt om bevestiging)
+Remove-CertTemplateFromAD -Name "CC-WebServer"
 
-$diffs = Compare-TemplateAttributes -Obj1 $current -Obj2 $desired
-$diffs
+# Verwijderen zonder bevestiging
+Remove-CertTemplateFromAD -Name "CC-WebServer" -Confirm:$false
+
+# Dry-run
+Remove-CertTemplateFromAD -Name "CC-WebServer" -WhatIf
 ```
 
 **Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-Obj1` | `object` | Yes | Current template object |
-| `-Obj2` | `object` | Yes | Desired template object (e.g. from JSON/AD) |
-
-**Output:** Hashtable where each key is a differing attribute name and the value is the desired state.
-
----
-
-### `Update-CertificateTemplate`
-
-Updates an existing certificate template in AD based on a JSON desired-state definition. Useful for applying targeted changes without re-importing the full template.
-
-```powershell
-$desiredJson = '{
-    "displayName": "Updated Web Server",
-    "msPKI-Certificate-Name-Flag": "1"
-}'
-
-Update-CertificateTemplate -Name "WebServer" -DesiredTemplateJson $desiredJson
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-Name` | `string` | Yes | CN of the template to update |
-| `-DesiredTemplateJson` | `string` | Yes | JSON string with desired attribute values |
-| `-Server` | `string` | No | Target DC FQDN |
+| Parameter | Type | Verplicht | Beschrijving |
+|-----------|------|-----------|--------------|
+| `-Name` | `string` | Ja | CN van het te verwijderen sjabloon |
+| `-Server` | `string` | Nee | Doel-DC FQDN |
+| `-Domain` | `string` | Nee | Domein-DN (automatisch ontdekt als weggelaten) |
 
 ---
 
-## Full workflow example
+## Volledige workflow
 
 ```powershell
 Import-Module PSPKI
 Import-Module CoreCert.TemplateUtils
 
-# 1. Export templates from source forest
+# 1. Exporteer sjablonen vanuit bronforest (of handmatig aangemaakte sjablonen in AD)
 $xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } |
        ConvertTo-SerializedTemplate
 
-# Save for version control
+# Sla op voor versiebeheer
 $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
 
-# 2. Import into target forest — same name
+# 2. Importeer in doelforest — zelfde naam
 Import-SerializedTemplate -XmlString $xml -Server "dc01.target.com"
 
-# 3. Or import with customer-specific name
+# 3. Of importeer met klant-specifieke naam
 Import-SerializedTemplate -XmlString $xml `
-    -SourceName "CC-WebServer" `
     -Name "ACME-WebServer" `
     -DisplayName "ACME Web Server" `
     -Server "dc01.acme.com"
 
-# 4. Verify result
+# 4. Re-importeer na aanpassing aan het bronsjabloon — automatisch update of no-op
+Import-SerializedTemplate -XmlString $updatedXml -Name "ACME-WebServer" -Server "dc01.acme.com"
+
+# 5. Inspecteer resultaat
 Get-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com" |
-    Select-Object Name, DisplayName, Created
+    Select-Object Name, DisplayName, Created, Modified
+
+# 6. Opruimen (bijv. na test of vervanging)
+Remove-CertTemplateFromAD -Name "ACME-WebServer" -Server "dc01.acme.com"
 ```
 
 ---
 
-## Tested on
+## Getest op
 
 - Windows Server 2019 / 2022
 - PowerShell 5.1
@@ -237,14 +232,13 @@ Get-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com" |
 
 ---
 
-## References
+## Referenties
 
-- [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx) — Vadims Podans (sysadmins.lv)
+- [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx) — Vadims Podans
 - [MS-XCEP: X.509 Certificate Enrollment Policy Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/)
 - [MS-CRTD: Certificate Template Structure](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/)
-- [pkix.net](https://github.com/Crypt32/pkix.net) — Vadims Podans' .NET PKI library
 - [PSPKI PowerShell module](https://github.com/Crypt32/PSPKI)
 
 ## Credits
 
-Original export/import technique by [Vadims Podans](https://www.sysadmins.lv/). This module implements his approach in a modular PowerShell form and extends it with multi-tenant name injection support.
+Originele export/import-techniek door [Vadims Podans](https://www.sysadmins.lv/). Deze module implementeert zijn aanpak in modulaire PowerShell-vorm en voegt idempotente import/update, multi-tenant naam-override en opschooningsondersteuning toe.
