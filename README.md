@@ -1,176 +1,244 @@
-CertTemplateUtils PowerShell Module
-The CertTemplateUtils module is a collection of PowerShell functions designed to facilitate the management of Active Directory Certificate Services (AD CS) templates. This module enables administrators to retrieve, compare, import, and update certificate templates directly within an Active Directory environment.
+# CoreCert.TemplateUtils
 
-# Compare-TemplateAttributes Function
+PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required for import/update operations.
 
-## Overview
-The `Compare-TemplateAttributes` function is designed to compare the attributes of two certificate templates and identify any differences. This is particularly useful for administrators and IT professionals working with certificate services in a Microsoft environment, to ensure that certificate templates are configured as intended.
+## Background
 
-## Features
-- **Attribute Comparison**: Compares a wide range of certificate template attributes, including integers, byte arrays, and collections.
-- **Versatile Input Handling**: Accepts two PowerShell objects representing the current and desired states of a certificate template, facilitating easy integration with automation scripts.
-- **Detailed Output**: Provides a hashtable detailing the differences between the two templates, with keys representing attribute names and values indicating the desired state.
+Vadims Podans ([@Crypt32](https://github.com/Crypt32)) discovered that the COM interfaces used by MS-XCEP can be reused to export certificate templates to a portable XML format and import them into any AD forest without requiring a forest trust. His approach is documented in [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx).
 
-## Prerequisites
-Before using the `Compare-TemplateAttributes` function, ensure you have a PowerShell environment configured with access to the `CertTemplateUtils` module.
+This module builds on that foundation with:
 
-## Parameters
+- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create) or already exists (diff → write only changed attributes → increment version). No separate update step needed.
+- **Multi-tenant name override**: import the same XML under a different name per customer/forest.
+- **No AD module required** for import and update operations — only PSPKI (for export via `Export-ADCSTemplate`) and `Get-ADCSTemplate` (for inspection via `Get-ADObject`).
 
-- `Obj1`: The current certificate template object.
-- `Obj2`: The desired certificate template object, typically obtained from a JSON conversion.
-
-## Outputs
-The function outputs a hashtable where each key is an attribute name and each value is the desired state of that attribute.
-
-## Usage Example
-
-```powershell
-$currentTemplate = <# Your current template object #>
-$desiredTemplate = <# Your desired template object #>
-
-$diffs = Compare-TemplateAttributes -Obj1 $currentTemplate -Obj2 $desiredTemplate
-```
-# CertTemplateUtils - ConvertTo-SerializedTemplate Function
-
-## Overview
-The `ConvertTo-SerializedTemplate` function is part of the CertTemplateUtils PowerShell module. It is designed to convert certificate template objects into a serialized format, which is useful for defining certificate policies in a standardized way. This function is particularly useful in environments where certificate templates need to be programmatically managed or integrated into automated workflows.
-
-## Description
-The function takes certificate template objects as input and converts them into a serialized format. This serialized format is then used to define certificate policies. The function handles various properties of the input templates, including cryptographic settings, validity periods, key usage, and more, ensuring that all necessary information is included in the serialized output.
-
-## Parameters
-
-### `-Template`
-- **Type**: Mandatory
-- **Description**: Specifies the certificate template object or objects to be converted. Each template object should contain properties for PSPKI (PowerShell PKI module) templates.
-
-## Usage Example
-
-```powershell
-$templatePSPKI = Get-CertificateTemplate -Name "WebServer" -ErrorAction Stop | Select-Object *
-
-ConvertTo-SerializedTemplate -Template $templatePSPKI
-```
-
-# Get-ADCSTemplate PowerShell Function
-
-## Introduction
-The `Get-ADCSTemplate` function is designed to return the properties of either a single or all Active Directory Certificate Templates. It can be used to retrieve detailed information about certificate templates configured in an Active Directory environment.
+---
 
 ## Prerequisites
-- PowerShell 5.1 or later.
-- Active Directory module for Windows PowerShell.
-- Requires Enterprise Administrator permissions, as this function interacts with the AD Configuration partition.
 
-## Parameters
-- `Name`: (Optional) Specifies the name of an Active Directory Certificate Services (AD CS) template to retrieve. If not provided, the function will return all templates.
-- `Server`: (Optional) Specifies the Fully Qualified Domain Name (FQDN) of an Active Directory Domain Controller to target for the operation. If not provided, the function searches for the nearest Domain Controller.
+- PowerShell 5.1 or newer
+- Windows Server 2008 R2 / Windows 7 or newer (CertEnroll COM for import)
+- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI`) — required for `Export-ADCSTemplate` and `Get-ADCSTemplate`
+- Enterprise Administrator permissions (templates are stored in the AD Configuration partition)
 
-## Usage
+---
 
-To retrieve all AD CS templates:
+## Installation
+
 ```powershell
-PS C:\> Get-ADCSTemplate
+# From PowerShell Gallery
+Install-Module CoreCert.TemplateUtils
+
+# Or clone and import manually
+Import-Module .\CoreCert.TemplateUtils.psd1
 ```
 
-To retrieve a specific template by name:
+---
+
+## How it works
+
+### Export (`Export-ADCSTemplate`)
+
+Reads a template object via PSPKI's `Get-CertificateTemplate` and serializes it to an **MS-XCEP-compatible XML string**. The XML contains all template settings: cryptography, validity, EKU, subject flags, extensions, key archival options, and RA requirements.
+
+### Import / Update (`Import-ADCSTemplate`)
+
+A single function that handles the full lifecycle:
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Template does **not** exist | Create via direct LDAP write + OID registration |
+| Template **exists** (same name/OID) | Diff XCEP attributes against AD; write only changed attributes; increment version |
+| Template **not found**, OID **exists** | Orphan OID error with cleanup instruction |
+| No changes detected | No-op (nothing written) |
+
+The update path uses `System.DirectoryServices` LDAP operations directly — no AD module required.
+
+### Multi-tenant / multi-forest name override
+
+Use `-Name` and `-DisplayName` to override the template identity in memory before import. The source XML on disk is never modified. When name or display name is overridden, a new OID is minted to avoid collisions.
+
 ```powershell
-PS C:\> Get-ADCSTemplate -Name "PowerShellCMS"
-```
-To sort templates by name and format the output:
-```powershell
-PS C:\> Get-ADCSTemplate | Sort-Object Name | Format-Table Name, Created, Modified
-```
-To view template permissions:
-```powershell
-PS C:\> $template = Get-ADCSTemplate -Name "pscms"
-PS C:\> $template.nTSecurityDescriptor
-PS C:\> $template.nTSecurityDescriptor.Sddl
-PS C:\> $template.nTSecurityDescriptor.Access
-PS C:\> ConvertFrom-SddlString -Sddl $template.nTSecurityDescriptor.sddl -Type ActiveDirectoryRights
+# Same XML, different name per customer
+Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer"    -DisplayName "ACME Web Server"
+Import-ADCSTemplate -XmlString $xml -Name "CONTOSO-WebServer" -DisplayName "Contoso Web Server"
 ```
 
-Ensure you have the necessary permissions to interact with AD CS and the AD Configuration partition.
-The function attempts to connect to the nearest Domain Controller by default unless a specific server is provided.
+---
 
-## Examples
-Retrieve and Display All Templates
+## Functions
+
+### `Export-ADCSTemplate`
+
+Exports one or more certificate template objects to an MS-XCEP XML string.
+
 ```powershell
+# Export a single template
+$xml = Get-CertificateTemplate -Name "CC-WebServer" | Export-ADCSTemplate
+
+# Export multiple templates (all CC-* templates)
+$xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } | Export-ADCSTemplate
+
+# Save to file (version control friendly)
+$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `-Template` | `CertificateTemplate[]` | Yes | Template object(s) from `Get-CertificateTemplate` (PSPKI) |
+
+---
+
+### `Import-ADCSTemplate`
+
+Imports certificate templates from MS-XCEP XML into Active Directory — creates if new, updates if already present.
+
+```powershell
+# Basic import — original name preserved
+Import-ADCSTemplate -XmlString $xml
+
+# Import to a specific DC
+Import-ADCSTemplate -XmlString $xml -Server "dc01.contoso.com"
+
+# Import with a new name (multi-tenant)
+Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server"
+
+# Version control: start at a clean baseline version
+Import-ADCSTemplate -XmlString $xml -Name "CC-WebServer" -Version "100.1"
+
+# Dry-run (no writes)
+Import-ADCSTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
+```
+
+**Update behaviour on re-import:**
+
+When a template with the same name already exists in AD, the function compares all XCEP attributes against AD values. Only changed attributes are written; the version number (revision) is incremented. If nothing has changed, the operation is a no-op.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `-XmlString` | `string` | Yes | MS-XCEP XML from `Export-ADCSTemplate` |
+| `-Name` | `string` | No | New template CN in AD. Overrides original name; mints a new OID. |
+| `-DisplayName` | `string` | No | New display name in AD. Overrides original; mints a new OID. |
+| `-Version` | `string` | No | Version as `"major.minor"` (e.g. `"100.1"`). Overrides source version. |
+| `-Server` | `string` | No | Target DC FQDN. Defaults to nearest writable DC. |
+| `-Domain` | `string` | No | Domain DN. Auto-discovered if not specified. |
+
+---
+
+### `Get-ADCSTemplate`
+
+Reads template properties directly from the AD Configuration partition. Useful for inspection, ACL review, and listing all templates in AD.
+
+> **Note:** This function requires the ActiveDirectory module (`RSAT` or `ActiveDirectory` PowerShell module), unlike `Import-ADCSTemplate`.
+
+```powershell
+# List all templates
 Get-ADCSTemplate
-```
 
-Retrieve a Specific Template by Name
-```powershell
-Get-ADCSTemplate -Name "WebServer"
-```
+# Retrieve a specific template
+Get-ADCSTemplate -Name "CC-WebServer"
 
-Sort and Display Templates by Name
-```powershell
+# From a specific DC
+Get-ADCSTemplate -Server "dc01.contoso.com"
+
+# Sorted overview
 Get-ADCSTemplate | Sort-Object Name | Format-Table Name, Created, Modified
+
+# Inspect ACLs
+$t = Get-ADCSTemplate -Name "CC-WebServer"
+$t.nTSecurityDescriptor.Access
+ConvertFrom-SddlString -Sddl $t.nTSecurityDescriptor.Sddl -Type ActiveDirectoryRights
 ```
 
-# Import-SerializedTemplate PowerShell Function
+**Parameters:**
 
-## Introduction
-The `Import-SerializedTemplate` function is designed to import and register certificate templates into Active Directory from a provided XML string. This function is particularly useful for automating the deployment of certificate templates across an environment.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `-Name` | `string` | No | Template CN to retrieve. Returns all templates if omitted. |
+| `-Server` | `string` | No | Target DC FQDN. Defaults to nearest DC. |
 
-## Prerequisites
-- PowerShell 5.1 or newer.
-- Must be run on Windows 7/Windows Server 2008 R2 or newer.
-- Active Directory module for Windows PowerShell.
+---
 
-## Parameters
+### `Remove-ADCSTemplate`
 
-### `-XmlString`
-- **Type**: Mandatory
-- **Description**: Specifies the XML string that contains the exported certificate templates.
-
-### `-Server`
-- **Type**: Optional
-- **Description**: Specifies the DNS name of the Active Directory server to which the changes will be applied. If this parameter is not specified, the changes will be applied to the default domain controller.
-
-## Usage Example
+Removes a certificate template and its OID registration from AD.
 
 ```powershell
-$templatePSPKI = Get-CertificateTemplate -Name "WebServer" -ErrorAction Stop | Select-Object *
+# Remove (prompts for confirmation)
+Remove-ADCSTemplate -Name "CC-WebServer"
 
-$xmlString = ConvertTo-SerializedTemplate -Template $templatePSPKI      
-  
-Import-SerializedTemplate -XmlString $xmlString
+# Remove without confirmation
+Remove-ADCSTemplate -Name "CC-WebServer" -Confirm:$false
+
+# Dry-run
+Remove-ADCSTemplate -Name "CC-WebServer" -WhatIf
 ```
 
-# Update-CertificateTemplate PowerShell Function
+**Parameters:**
 
-## Introduction
-The `Update-CertificateTemplate` function is designed to update the attributes of an existing certificate template in Active Directory. It allows for modifications to certificate templates based on a desired state defined in a JSON string.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `-Name` | `string` | Yes | CN of the template to remove |
+| `-Server` | `string` | No | Target DC FQDN |
+| `-Domain` | `string` | No | Domain DN (auto-discovered if not specified) |
 
-## Prerequisites
-- PowerShell 5.1 or newer.
-- Active Directory PowerShell module.
-- Appropriate permissions to modify certificate templates in Active Directory.
+---
 
-## Parameters
-
-### `-Name`
-- **Type**: Mandatory
-- **Description**: Specifies the name of the certificate template to be updated.
-
-### `-DesiredTemplateJson`
-- **Type**: Mandatory
-- **Description**: A JSON string that represents the desired state of the certificate template.
-
-### `-Server`
-- **Type**: Optional
-- **Description**: Specifies the domain controller to connect to. If not specified, the function discovers and uses a writable domain controller.
-
-## Usage Example
+## Full workflow example
 
 ```powershell
-$templateJson = '{
-    "displayName": "Updated Web Server Template",
-    "Name": "UpdatedWebServerTemplate",
-    "flags": "131649"
-}'
+Import-Module PSPKI
+Import-Module CoreCert.TemplateUtils
 
-Update-CertificateTemplate -Name "WebServerTemplate" -DesiredTemplateJson $templateJson
+# 1. Export templates from source forest (or from manually created templates in AD)
+$xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } |
+       Export-ADCSTemplate
+
+# Save for version control
+$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
+
+# 2. Import into target forest — same name
+Import-ADCSTemplate -XmlString $xml -Server "dc01.target.com"
+
+# 3. Or import with a customer-specific name
+Import-ADCSTemplate -XmlString $xml `
+    -Name "ACME-WebServer" `
+    -DisplayName "ACME Web Server" `
+    -Server "dc01.acme.com"
+
+# 4. Re-import after updating the source template — automatically updates or no-ops
+Import-ADCSTemplate -XmlString $updatedXml -Name "ACME-WebServer" -Server "dc01.acme.com"
+
+# 5. Inspect result
+Get-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com" |
+    Select-Object Name, DisplayName, Created, Modified
+
+# 6. Clean up (e.g. after a test or replacement)
+Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
 ```
+
+---
+
+## Tested on
+
+- Windows Server 2019 / 2022
+- PowerShell 5.1
+- PSPKI 4.4.0
+- AD CS Enterprise CA
+
+---
+
+## References
+
+- [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx) — Vadims Podans
+- [MS-XCEP: X.509 Certificate Enrollment Policy Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/)
+- [MS-CRTD: Certificate Template Structure](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/)
+- [PSPKI PowerShell module](https://github.com/Crypt32/PSPKI)
+
+## Credits
+
+Original export/import technique by [Vadims Podans](https://www.sysadmins.lv/). This module implements his approach in modular PowerShell form and extends it with idempotent import/update, multi-tenant name override, and template cleanup support.

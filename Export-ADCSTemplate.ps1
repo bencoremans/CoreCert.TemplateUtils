@@ -11,7 +11,7 @@ Specifies the template object or objects to be converted. Each template object s
 .EXAMPLE
 templatePSPKI = Get-CertificateTemplate -Name "WebServer" -ErrorAction Stop | Select-Object *
 
-ConvertTo-SerializedTemplate -Template $templateObject
+Export-ADCSTemplate -Template $templateObject
 
 Converts the specified template object into a serialized format for certificate policies.
 
@@ -26,7 +26,7 @@ The original function is made by Vadims Podans.
 https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx
 
 #>
-function ConvertTo-SerializedTemplate {
+function Export-ADCSTemplate {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -172,12 +172,12 @@ function ConvertTo-SerializedTemplate {
             $str + "</supersededPolicies>"
         }
         # list of CSPs
-        $CSPs = if ($temp.Settings.Cryptography.CSPList.Count -eq 0) {
+        $CSPs = if ($temp.Settings.Cryptography.ProviderList.Count -eq 0) {
             '<cryptoProviders xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
         }
         else {
             $str = "<cryptoProviders>`n"
-            $temp.Settings.Cryptography.CSPList | ForEach-Object {
+            $temp.Settings.Cryptography.ProviderList | ForEach-Object {
                 $str += "<provider>$_</provider>`n"
             }
             $str + "</cryptoProviders>"

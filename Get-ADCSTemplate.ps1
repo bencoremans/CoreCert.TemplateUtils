@@ -32,14 +32,15 @@ function Get-ADCSTemplate {
     param(
         [parameter(Position=0)]
         [string]$Name,
-        [string]$Server = (Get-ADDomainController -Discover -ForceDiscover -Writable).HostName[0]
+        [string]$Server = ""
     )
 
     begin {
         try {
-            $ConfigNC = $((Get-ADRootDSE -Server $Server).configurationNamingContext)
+            $rootDseParams = if ($Server) { @{ Server = $Server } } else { @{} }
+            $ConfigNC = $((Get-ADRootDSE @rootDseParams).configurationNamingContext)
             if (-not $ConfigNC) {
-                Write-Error "Unable to retrieve Configuration Naming Context from the server $Server."
+                Write-Error "Unable to retrieve Configuration Naming Context."
                 return
             }
             $TemplatePath = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigNC"
@@ -57,7 +58,8 @@ function Get-ADCSTemplate {
                 $LDAPFilter = '(objectClass=pKICertificateTemplate)'
             }
 
-            $templates = Get-ADObject -SearchScope Subtree -SearchBase $TemplatePath -LDAPFilter $LDAPFilter -Properties * -Server $Server
+            $adParams = if ($Server) { @{ Server = $Server } } else { @{} }
+            $templates = Get-ADObject -SearchScope Subtree -SearchBase $TemplatePath -LDAPFilter $LDAPFilter -Properties * @adParams
             if (-not $templates) {
                 if ($Name) {
                     Write-Warning "No templates found with Name '$Name'."
