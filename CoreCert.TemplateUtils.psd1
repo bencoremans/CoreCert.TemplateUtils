@@ -1,6 +1,6 @@
 @{
     RootModule        = 'CoreCert.TemplateUtils.psm1'
-    ModuleVersion     = '2.1.0'
+    ModuleVersion     = '2.2.0'
     GUID              = 'c8e82f8d-13d2-4a1d-91b3-24ff8b01827d'
     Author            = 'Ben Coremans'
     Description       = 'PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required for import/update operations.'
@@ -29,19 +29,23 @@
             Tags         = @('PKI', 'ADCS', 'CertificateTemplates', 'ActiveDirectory', 'CoreCert')
             ProjectUri   = ''
             ReleaseNotes = @'
+## 2.2.0
+- Import-ADCSTemplate update path now compares all XCEP-representable attributes:
+  8 integer flags + binary period fields (validity/renewal) + version.
+- Import-ADCSTemplate supports multi-policy XML (multiple templates in one XML).
+- Get-ADCSTemplate rewritten: uses System.DirectoryServices only, no ActiveDirectory
+  module dependency.
+- Export-ADCSTemplate: improved multi-template input validation.
+- Remove-ADCSTemplate: early return when template not found (no misleading output).
+- PSPKI removed from RequiredModules (only needed at runtime by Export-ADCSTemplate).
+- README updated to reflect current implementation.
+
 ## 2.1.0
-- Renamed all functions to consistent *-ADCSTemplate pattern:
-    ConvertTo-SerializedTemplate -> Export-ADCSTemplate
-    Import-SerializedTemplate    -> Import-ADCSTemplate
-    Remove-CertTemplateFromAD    -> Remove-ADCSTemplate
-  Get-ADCSTemplate unchanged.
-- Renamed PS1 files to match function names.
+- Renamed all functions to consistent *-ADCSTemplate pattern.
 
 ## 2.0.0
-- Import-ADCSTemplate (formerly Import-SerializedTemplate) now handles both create
-  and update in one idempotent call. No separate Update-CertificateTemplate needed.
-- Removed Update-CertificateTemplate (superseded).
-- Removed Compare-TemplateAttributes (logic inlined; AD module no longer required).
+- Import-ADCSTemplate now handles both create and update in one idempotent call.
+- Removed Update-CertificateTemplate and Compare-TemplateAttributes.
 '@
         }
     }
