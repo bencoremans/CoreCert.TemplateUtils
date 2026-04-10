@@ -47,7 +47,7 @@
     https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/
 #>
 function Remove-CertTemplateFromAD {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
