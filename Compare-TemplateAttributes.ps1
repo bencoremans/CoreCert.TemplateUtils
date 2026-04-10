@@ -1,24 +1,37 @@
 <#
 .SYNOPSIS
-Compares attributes of two certificate templates and identifies differences.
+Compares attributes of two certificate templates and returns a hashtable of differences.
 
 .DESCRIPTION
-This function takes two certificate template objects as input and compares their attributes to identify differences. It is specifically designed to handle various attribute types appropriately, including integers, byte arrays, and collections.
+Takes two PSObjects representing certificate template states and compares their attributes.
+Handles type-specific normalization to avoid false positives from null/0 and empty/missing
+multi-value attributes:
+
+  int    : null/missing treated as 0; cast to [int] before compare
+  bytes  : null/missing treated as empty byte[]; Base64-encode for stable compare
+  strings: null/missing treated as empty array; sorted for order-independent compare
+  other  : trimmed string comparison
+
+The "current" object (Obj1) is typically the result of Get-ADCSTemplate / Get-ADObject.
+The "desired" object (Obj2) is typically built from ConvertTo-SerializedTemplate XML
+or from a JSON representation of the desired state.
 
 .PARAMETER Obj1
-The current certificate template object.
+Current state -- usually the live AD template object.
 
 .PARAMETER Obj2
-The desired certificate template object represented as a PowerShell object, typically obtained from JSON conversion.
+Desired state -- usually built from serialized source XML or JSON.
 
 .OUTPUTS
-Hashtable of differences where keys are attribute names and values are the desired state of those attributes.
+[hashtable] Keys: attribute names that differ. Values: the desired value to write.
+            Empty hashtable means no differences.
 
 .EXAMPLE
-$diffs = Compare-TemplateAttributes -Obj1 $currentTemplate -Obj2 $desiredTemplate
-This example compares the current and desired state of a certificate template and stores the differences in $diffs.
+$current = Get-ADCSTemplate -Name "CC-WebServer"
+$diffs   = Compare-TemplateAttributes -Obj1 $current -Obj2 $desired
 #>
 function Compare-TemplateAttributes {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [psobject]$Obj1,
@@ -27,44 +40,106 @@ function Compare-TemplateAttributes {
         [psobject]$Obj2
     )
 
+    # Attribute type classification
+    $intAttrs    = [System.Collections.Generic.HashSet[string]]@(
+        'flags','msPKI-Certificate-Name-Flag','msPKI-Enrollment-Flag',
+        'msPKI-Minimal-Key-Size','msPKI-Private-Key-Flag',
+        'msPKI-Template-Minor-Revision','msPKI-Template-Schema-Version',
+        'msPKI-RA-Signature','pKIMaxIssuingDepth','pKIDefaultKeySpec','revision'
+    )
+    $strArrayAttrs = [System.Collections.Generic.HashSet[string]]@(
+        'msPKI-Certificate-Application-Policy','msPKI-Certificate-Policy',
+        'pKICriticalExtensions','pKIDefaultCSPs','pKIExtendedKeyUsage',
+        'msPKI-RA-Application-Policies'
+    )
+    $byteAttrs   = [System.Collections.Generic.HashSet[string]]@(
+        'pKIExpirationPeriod','pKIKeyUsage','pKIOverlapPeriod'
+    )
+
+    # -- Normalization helpers --
+
+    # Canonical int: null/missing -> 0
+    function Norm-Int([object]$v) {
+        if ($null -eq $v) { return 0 }
+        # ADPropertyValueCollection: take first element
+        if ($v -is [Microsoft.ActiveDirectory.Management.ADPropertyValueCollection]) {
+            if ($v.Count -eq 0) { return 0 }
+            return [int]$v[0]
+        }
+        return [int]$v
+    }
+
+    # Canonical bytes: null/missing -> ""; else Base64 of byte[]
+    function Norm-Bytes([object]$v) {
+        if ($null -eq $v) { return "" }
+        if ($v -is [Microsoft.ActiveDirectory.Management.ADPropertyValueCollection]) {
+            if ($v.Count -eq 0) { return "" }
+            $v = $v[0]
+        }
+        if ($v -is [byte[]]) { return [Convert]::ToBase64String($v) }
+        return [Convert]::ToBase64String([byte[]]$v)
+    }
+
+    # Canonical string array: null/missing -> @(); sort for order-independence
+    function Norm-StrArray([object]$v) {
+        if ($null -eq $v) { return @() }
+        if ($v -is [Microsoft.ActiveDirectory.Management.ADPropertyValueCollection]) {
+            $arr = @($v | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+        } elseif ($v -is [System.Collections.IEnumerable] -and $v -isnot [string]) {
+            $arr = @($v | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ })
+        } else {
+            $arr = @($v.ToString().Trim()) | Where-Object { $_ }
+        }
+        return ($arr | Sort-Object)
+    }
+
     $differences = @{}
-    $properties = ($Obj1.PSObject.Properties.Name + $Obj2.PSObject.Properties.Name) | Select-Object -Unique
 
-    foreach ($property in $properties) {
-        $value1 = $Obj1.$property
-        $value2 = $Obj2.$property
+    # Only compare properties defined in the desired state (Obj2).
+    # Obj1 (current ADObject) carries many read-only metadata properties
+    # (DistinguishedName, ObjectGUID, whenCreated, ...) that are not part of
+    # the desired state and must not be diffed.
+    $properties = @($Obj2.PSObject.Properties.Name)
 
-        # Detecteer en converteer attributen afzonderlijk op basis van hun naam
-        if ('flags', 'msPKI-Certificate-Name-Flag', 'msPKI-Enrollment-Flag', 'msPKI-Minimal-Key-Size',
-            'msPKI-Private-Key-Flag', 'msPKI-Template-Minor-Revision', 'msPKI-Template-Schema-Version',
-            'msPKI-RA-Signature', 'pKIMaxIssuingDepth', 'pKIDefaultKeySpec', 'revision' -contains $property) {
-            if ($value1 -ne $value2) {
-                $differences[$property] = [int]$value2
+    foreach ($prop in $properties) {
+        $v1 = $Obj1.$prop
+        $v2 = $Obj2.$prop
+
+        if ($intAttrs.Contains($prop)) {
+            $n1 = Norm-Int $v1
+            $n2 = Norm-Int $v2
+            if ($n1 -ne $n2) {
+                Write-Verbose "  Diff [$prop] int: AD=$n1  src=$n2"
+                $differences[$prop] = $n2
             }
         }
-        elseif ('msPKI-Certificate-Application-Policy', 'pKICriticalExtensions', 'pKIDefaultCSPs',
-                'pKIExtendedKeyUsage', 'msPKI-Certificate-Policy' -contains $property) {
-            $array1 = $value1 | ForEach-Object { $_.ToString() }
-            $array2 = $value2 | ForEach-Object { $_.ToString() }
-            if ($null -ne $array1 -and $null -ne $array2 -and (Compare-Object -ReferenceObject $array1 -DifferenceObject $array2)) {
-                $differences[$property] = $value2  # Pas op met conversie
+        elseif ($byteAttrs.Contains($prop)) {
+            $n1 = Norm-Bytes $v1
+            $n2 = Norm-Bytes $v2
+            if ($n1 -ne $n2) {
+                Write-Verbose "  Diff [$prop] bytes: AD=$n1  src=$n2"
+                # Write the actual byte[] value from desired, not the Base64 string
+                $rawV2 = if ($v2 -is [byte[]]) { $v2 } else { [Convert]::FromBase64String($n2) }
+                $differences[$prop] = $rawV2
             }
         }
-        elseif ('pKIExpirationPeriod', 'pKIKeyUsage', 'pKIOverlapPeriod' -contains $property) {
-            if ($null -ne $value1 -and $null -ne $value2 -and (Compare-Object -ReferenceObject $value1 -DifferenceObject $value2)) {
-                $differences[$property] = [byte[]]$value2
+        elseif ($strArrayAttrs.Contains($prop)) {
+            $n1 = Norm-StrArray $v1
+            $n2 = Norm-StrArray $v2
+            $diff = Compare-Object -ReferenceObject @($n1) -DifferenceObject @($n2) -ErrorAction SilentlyContinue
+            if ($diff) {
+                Write-Verbose "  Diff [$prop] strings: AD=[$($n1 -join '|')]  src=[$($n2 -join '|')]"
+                $rawV2 = Norm-StrArray $v2   # already normalized string array
+                $differences[$prop] = if ($rawV2.Count -gt 0) { $rawV2 } else { $null }
             }
         }
         else {
-            if ($value1 -is [string] -and $value2 -is [string]) {
-                $trimmedValue1 = $value1.Trim()
-                $trimmedValue2 = $value2.Trim()
-                if ($trimmedValue1 -cne $trimmedValue2) {
-                    $differences[$property] = $trimmedValue2
-                }
-            }
-            elseif ($value1 -ne $value2) {
-                $differences[$property] = $value2
+            # Generic string / other
+            $s1 = if ($null -eq $v1) { "" } else { $v1.ToString().Trim() }
+            $s2 = if ($null -eq $v2) { "" } else { $v2.ToString().Trim() }
+            if ($s1 -ne $s2) {
+                Write-Verbose "  Diff [$prop] string: AD='$s1'  src='$s2'"
+                $differences[$prop] = if ($s2 -eq "") { $null } else { $s2 }
             }
         }
     }

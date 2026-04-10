@@ -1,25 +1,38 @@
 <#
 .SYNOPSIS
-Updates the attributes of an existing certificate template in Active Directory.
+Updates an existing certificate template in AD to match a desired state.
 
 .DESCRIPTION
-This function updates an existing certificate template in Active Directory with desired attribute values. It first retrieves the current state of the template, compares it with the desired state, and applies any differences.
+Retrieves the current template from AD via Get-ADCSTemplate, compares it with
+the desired state using Compare-TemplateAttributes, and applies only the
+attributes that differ via Set-ADObject / Clear.
+
+This is the write-back engine used by Import-SerializedTemplate for the UPDATE
+path. It can also be called directly when you already have the desired state
+as a PSObject or JSON string.
 
 .PARAMETER Name
-The name of the certificate template to update.
+CN of the certificate template to update.
 
 .PARAMETER DesiredTemplateJson
-A JSON string representing the desired state of the certificate template.
+JSON string of the desired state. Keys are LDAP attribute names; values are
+the desired values in their native types (int / byte[] / string[]).
+Produced by: $desiredPSObject | ConvertTo-Json -Depth 5
 
 .PARAMETER Server
-(Optional) The domain controller to connect to. If not specified, the function discovers and uses a writable domain controller.
+Optional. FQDN of the domain controller to use. Defaults to the nearest
+writable DC discovered automatically.
 
 .EXAMPLE
-Update-CertificateTemplate -Name "WebServerTemplate" -DesiredTemplateJson $templateJson
-This example updates the "WebServerTemplate" with the desired attributes specified in the $templateJson string.
+# Update from a JSON blob
+Update-CertificateTemplate -Name "CC-WebServer" -DesiredTemplateJson $json
+
+.EXAMPLE
+# Typically called by Import-SerializedTemplate -- not manually
+Import-SerializedTemplate -XmlString $xml -Name "CC-WebServer"
 #>
-Function Update-CertificateTemplate {
-    [CmdletBinding()]
+function Update-CertificateTemplate {
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)]
         [string]$Name,
@@ -27,55 +40,70 @@ Function Update-CertificateTemplate {
         [Parameter(Mandatory)]
         [string]$DesiredTemplateJson,
 
-        [string]$Server = (Get-ADDomainController -Discover -ForceDiscover -Writable).HostName[0]
+        [string]$Server = ""
     )
 
-    if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-        Import-Module ActiveDirectory -ErrorAction Stop
-    }
-
-    $ConfigNC = $((Get-ADRootDSE -Server $Server).configurationNamingContext)
-    $TemplatePath = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigNC"
-
-    Try {
-        $currentTemplate = Get-ADObject -Filter "Name -eq '$Name'" -SearchBase $TemplatePath -Properties * -ErrorAction Stop
-        if (-not $currentTemplate) {
-            Write-Error "Template with Name '$Name' not found."
-            return
-        }
-
-        $Properties = 'name', 'displayName', 'objectClass', 'flags', 'revision', '*pki*'
-        $ExcludeProperties = "*oid*"
-        $desiredTemplate = ($DesiredTemplateJson | ConvertFrom-Json -ErrorAction Stop ) | Select-Object -Property $Properties -ExcludeProperty $ExcludeProperties
-        $differences = Compare-TemplateAttributes -Obj1 ($currentTemplate | Select-Object -Property $Properties -ExcludeProperty $ExcludeProperties) -Obj2 $desiredTemplate
-
-        $clearAttributes = @()
-        $replaceAttributes = @{}
-
-        foreach ($property in $differences.Keys) {
-            if ($differences[$property] -eq $null -or $differences[$property] -eq '' -or ($differences[$property] -is [array] -and $differences[$property].Count -eq 0)) {
-                $clearAttributes += $property
-            } else {
-                $replaceAttributes[$property] = $differences[$property]
+    # Resolve DC -- use local DC if no server specified (avoids blocking discovery on the DC itself)
+    if (-not $Server) {
+        if (Get-Command Get-ADDomainController -ErrorAction SilentlyContinue) {
+            try {
+                # -Discover without -ForceDiscover uses cached result; avoids blocking network scan
+                $Server = (Get-ADDomainController -Discover -Writable -ErrorAction Stop).HostName[0]
+            } catch {
+                Write-Verbose "DC discovery failed ($($_.Exception.Message)); will use default LDAP connection."
             }
         }
+    }
 
-        if ($replaceAttributes.Count -gt 0) {
-            Set-ADObject -Identity $currentTemplate.DistinguishedName -Replace $replaceAttributes -Server $Server -ErrorAction Stop
-        }
+    $adParams = @{}
+    if ($Server) { $adParams['Server'] = $Server }
 
-        if ($clearAttributes.Count -gt 0) {
-            Set-ADObject -Identity $currentTemplate.DistinguishedName -Clear $clearAttributes -Server $Server -ErrorAction Stop
-        }
+    # Load current state
+    $currentTemplate = Get-ADCSTemplate -Name $Name @adParams
+    if (-not $currentTemplate) {
+        Write-Error "Template '$Name' not found in AD."
+        return
+    }
 
-        if ($replaceAttributes.Count -gt 0 -or $clearAttributes.Count -gt 0) {
-            Write-Host "Template '$Name' updated successfully with the following changes:"
-            $replaceAttributes.GetEnumerator() | ForEach-Object { Write-Host "$($_.Key): $($_.Value)" }
-            $clearAttributes | ForEach-Object { Write-Host "$_ cleared" }
+    # Deserialize desired state
+    $desired = $DesiredTemplateJson | ConvertFrom-Json -ErrorAction Stop
+
+    # Run diff
+    $differences = Compare-TemplateAttributes -Obj1 $currentTemplate -Obj2 $desired -Verbose:($VerbosePreference -eq 'Continue')
+
+    if ($differences.Count -eq 0) {
+        Write-Verbose "Template '$Name' is identical to desired state. No changes."
+        Write-Output "Template '$Name' is already up to date. No changes applied."
+        return
+    }
+
+    # Split into replace (non-null) and clear (null/empty)
+    $replaceAttrs = @{}
+    $clearAttrs   = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($key in $differences.Keys) {
+        $val = $differences[$key]
+        if ($null -eq $val -or ($val -is [string] -and $val -eq "") -or ($val -is [array] -and $val.Count -eq 0)) {
+            $clearAttrs.Add($key)
         } else {
-            Write-Host "No changes detected for template '$Name'."
+            $replaceAttrs[$key] = $val
         }
-    } Catch {
-        Write-Error "An error occurred: $_"
+    }
+
+    $changedList = @($replaceAttrs.Keys) + @($clearAttrs)
+    $changeDesc  = "$($differences.Count) attribute(s): $($changedList -join ', ')"
+
+    if ($PSCmdlet.ShouldProcess("Template '$Name'", "Update in AD ($changeDesc)")) {
+        Write-Verbose "Applying update to '$Name': $changeDesc"
+
+        if ($replaceAttrs.Count -gt 0) {
+            Set-ADObject -Identity $currentTemplate.DistinguishedName -Replace $replaceAttrs @adParams -ErrorAction Stop
+        }
+        if ($clearAttrs.Count -gt 0) {
+            Set-ADObject -Identity $currentTemplate.DistinguishedName -Clear $clearAttrs @adParams -ErrorAction Stop
+        }
+
+        Write-Verbose "Template '$Name' updated."
+        Write-Output "Template '$Name' updated successfully ($changeDesc)."
     }
 }
