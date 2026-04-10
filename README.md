@@ -1,6 +1,6 @@
 # CoreCert.TemplateUtils
 
-PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required for import/update operations.
+PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required.
 
 ## Background
 
@@ -8,9 +8,9 @@ Vadims Podans ([@Crypt32](https://github.com/Crypt32)) discovered that the COM i
 
 This module builds on that foundation with:
 
-- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create) or already exists (diff → write only changed attributes → increment version). No separate update step needed.
+- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create via COM) or already exists (diff → write only changed attributes via LDAP → increment version). No separate update step needed.
 - **Multi-tenant name override**: import the same XML under a different name per customer/forest.
-- **No AD module required** for import and update operations — only PSPKI (for export via `Export-ADCSTemplate`) and `Get-ADCSTemplate` (for inspection via `Get-ADObject`).
+- **No AD module required**: all functions use `System.DirectoryServices` directly. Only `Export-ADCSTemplate` requires PSPKI.
 
 ---
 
@@ -18,7 +18,7 @@ This module builds on that foundation with:
 
 - PowerShell 5.1 or newer
 - Windows Server 2008 R2 / Windows 7 or newer (CertEnroll COM for import)
-- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI`) — required for `Export-ADCSTemplate` and `Get-ADCSTemplate`
+- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI -AllowClobber`) — required **only** for `Export-ADCSTemplate`
 - Enterprise Administrator permissions (templates are stored in the AD Configuration partition)
 
 ---
@@ -39,7 +39,7 @@ Import-Module .\CoreCert.TemplateUtils.psd1
 
 ### Export (`Export-ADCSTemplate`)
 
-Reads a template object via PSPKI's `Get-CertificateTemplate` and serializes it to an **MS-XCEP-compatible XML string**. The XML contains all template settings: cryptography, validity, EKU, subject flags, extensions, key archival options, and RA requirements.
+Reads template objects via PSPKI's `Get-CertificateTemplate` (for settings/extensions) and `Get-ADCSTemplate` (for AD-specific attributes like `msPKI-Private-Key-Flag`), then serializes them to an **MS-XCEP-compatible XML string**.
 
 ### Import / Update (`Import-ADCSTemplate`)
 
@@ -47,16 +47,23 @@ A single function that handles the full lifecycle:
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Template does **not** exist | Create via direct LDAP write + OID registration |
-| Template **exists** (same name/OID) | Diff XCEP attributes against AD; write only changed attributes; increment version |
-| Template **not found**, OID **exists** | Orphan OID error with cleanup instruction |
+| Template does **not** exist | Create via `CX509CertificateTemplateADWritable` COM (new OID minted automatically) |
+| Template **exists** (same name) | Diff XCEP attributes against AD; write only changed attributes via LDAP; increment version |
 | No changes detected | No-op (nothing written) |
 
-The update path uses `System.DirectoryServices` LDAP operations directly — no AD module required.
+**Attributes compared in the update path:**
+
+| Category | Attributes |
+|----------|-----------|
+| Integer flags | `msPKI-Private-Key-Flag`, `msPKI-Certificate-Name-Flag`, `msPKI-Enrollment-Flag`, `flags`, `msPKI-Template-Schema-Version`, `pKIDefaultKeySpec`, `msPKI-Minimal-Key-Size`, `msPKI-RA-Signature` |
+| Binary periods | `pKIExpirationPeriod` (validity), `pKIOverlapPeriod` (renewal) |
+| Version | `revision`, `msPKI-Template-Minor-Revision` |
+
+> **Note:** `pKIExtendedKeyUsage`, `msPKI-Certificate-Application-Policy`, and `pKICriticalExtensions` are set by the COM layer during create and are embedded in extension blobs — not separately represented in MS-XCEP XML. To update these, use `Remove-ADCSTemplate` followed by `Import-ADCSTemplate` (delete/recreate via COM).
 
 ### Multi-tenant / multi-forest name override
 
-Use `-Name` and `-DisplayName` to override the template identity in memory before import. The source XML on disk is never modified. When name or display name is overridden, a new OID is minted to avoid collisions.
+Use `-Name` and `-DisplayName` to override the template identity in memory before import. The source XML on disk is never modified. A new OID is always minted by the COM layer on create.
 
 ```powershell
 # Same XML, different name per customer
@@ -74,10 +81,20 @@ Exports one or more certificate template objects to an MS-XCEP XML string.
 
 ```powershell
 # Export a single template
-$xml = Get-CertificateTemplate -Name "CC-WebServer" | Export-ADCSTemplate
+$t = @{
+    templatePSPKI = Get-CertificateTemplate -Name "CC-WebServer"
+    templateADO   = Get-ADCSTemplate        -Name "CC-WebServer"
+}
+$xml = Export-ADCSTemplate -Template $t
 
-# Export multiple templates (all CC-* templates)
-$xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } | Export-ADCSTemplate
+# Export multiple templates
+$templates = "CC-WebServer","CC-ClientAuth" | ForEach-Object {
+    @{
+        templatePSPKI = Get-CertificateTemplate -Name $_
+        templateADO   = Get-ADCSTemplate        -Name $_
+    }
+}
+$xml = Export-ADCSTemplate -Template $templates
 
 # Save to file (version control friendly)
 $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
@@ -87,7 +104,9 @@ $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `-Template` | `CertificateTemplate[]` | Yes | Template object(s) from `Get-CertificateTemplate` (PSPKI) |
+| `-Template` | `hashtable[]` | Yes | One or more hashtables with `templatePSPKI` (from PSPKI) and `templateADO` (from `Get-ADCSTemplate`) keys |
+
+**Requires:** PSPKI module (`Install-Module PSPKI -AllowClobber`)
 
 ---
 
@@ -112,17 +131,13 @@ Import-ADCSTemplate -XmlString $xml -Name "CC-WebServer" -Version "100.1"
 Import-ADCSTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
 ```
 
-**Update behaviour on re-import:**
-
-When a template with the same name already exists in AD, the function compares all XCEP attributes against AD values. Only changed attributes are written; the version number (revision) is incremented. If nothing has changed, the operation is a no-op.
-
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `-XmlString` | `string` | Yes | MS-XCEP XML from `Export-ADCSTemplate` |
-| `-Name` | `string` | No | New template CN in AD. Overrides original name; mints a new OID. |
-| `-DisplayName` | `string` | No | New display name in AD. Overrides original; mints a new OID. |
+| `-Name` | `string` | No | New template CN in AD. Overrides original name. Only valid for single-template XML. |
+| `-DisplayName` | `string` | No | New display name in AD. Defaults to `-Name` if not specified. |
 | `-Version` | `string` | No | Version as `"major.minor"` (e.g. `"100.1"`). Overrides source version. |
 | `-Server` | `string` | No | Target DC FQDN. Defaults to nearest writable DC. |
 | `-Domain` | `string` | No | Domain DN. Auto-discovered if not specified. |
@@ -131,9 +146,7 @@ When a template with the same name already exists in AD, the function compares a
 
 ### `Get-ADCSTemplate`
 
-Reads template properties directly from the AD Configuration partition. Useful for inspection, ACL review, and listing all templates in AD.
-
-> **Note:** This function requires the ActiveDirectory module (`RSAT` or `ActiveDirectory` PowerShell module), unlike `Import-ADCSTemplate`.
+Reads template properties directly from the AD Configuration partition using `System.DirectoryServices`. No ActiveDirectory module required.
 
 ```powershell
 # List all templates
@@ -150,8 +163,7 @@ Get-ADCSTemplate | Sort-Object Name | Format-Table Name, Created, Modified
 
 # Inspect ACLs
 $t = Get-ADCSTemplate -Name "CC-WebServer"
-$t.nTSecurityDescriptor.Access
-ConvertFrom-SddlString -Sddl $t.nTSecurityDescriptor.Sddl -Type ActiveDirectoryRights
+$t.nTSecurityDescriptor
 ```
 
 **Parameters:**
@@ -165,7 +177,7 @@ ConvertFrom-SddlString -Sddl $t.nTSecurityDescriptor.Sddl -Type ActiveDirectoryR
 
 ### `Remove-ADCSTemplate`
 
-Removes a certificate template and its OID registration from AD.
+Removes a certificate template **and** its OID registration from AD. Both must be removed to allow clean re-import via COM (`CX509CertificateTemplateADWritable.Commit()` checks OID uniqueness).
 
 ```powershell
 # Remove (prompts for confirmation)
@@ -194,30 +206,38 @@ Remove-ADCSTemplate -Name "CC-WebServer" -WhatIf
 Import-Module PSPKI
 Import-Module CoreCert.TemplateUtils
 
-# 1. Export templates from source forest (or from manually created templates in AD)
-$xml = Get-CertificateTemplate | Where-Object { $_.Name -like "CC-*" } |
-       Export-ADCSTemplate
+# 1. Export templates from source forest
+$templates = "CC-WebServer","CC-ClientAuth" | ForEach-Object {
+    @{
+        templatePSPKI = Get-CertificateTemplate -Name $_
+        templateADO   = Get-ADCSTemplate        -Name $_
+    }
+}
+$xml = Export-ADCSTemplate -Template $templates
 
 # Save for version control
 $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
 
-# 2. Import into target forest — same name
+# 2. Import into target forest — same names
 Import-ADCSTemplate -XmlString $xml -Server "dc01.target.com"
 
-# 3. Or import with a customer-specific name
-Import-ADCSTemplate -XmlString $xml `
+# 3. Or import with a customer-specific name (single template XML only)
+$singleXml = Export-ADCSTemplate -Template @{
+    templatePSPKI = Get-CertificateTemplate -Name "CC-WebServer"
+    templateADO   = Get-ADCSTemplate        -Name "CC-WebServer"
+}
+Import-ADCSTemplate -XmlString $singleXml `
     -Name "ACME-WebServer" `
     -DisplayName "ACME Web Server" `
     -Server "dc01.acme.com"
 
 # 4. Re-import after updating the source template — automatically updates or no-ops
-Import-ADCSTemplate -XmlString $updatedXml -Name "ACME-WebServer" -Server "dc01.acme.com"
+Import-ADCSTemplate -XmlString $updatedXml -Server "dc01.acme.com"
 
 # 5. Inspect result
-Get-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com" |
-    Select-Object Name, DisplayName, Created, Modified
+Get-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
 
-# 6. Clean up (e.g. after a test or replacement)
+# 6. Clean up
 Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
 ```
 
@@ -241,4 +261,4 @@ Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
 
 ## Credits
 
-Original export/import technique by [Vadims Podans](https://www.sysadmins.lv/). This module implements his approach in modular PowerShell form and extends it with idempotent import/update, multi-tenant name override, and template cleanup support.
+Original export/import technique by [Vadims Podans](https://www.sysadmins.lv/). This module extends his approach with idempotent import/update, multi-tenant name override, comprehensive attribute diffing, and template cleanup support.
