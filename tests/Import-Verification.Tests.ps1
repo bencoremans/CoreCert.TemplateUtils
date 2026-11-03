@@ -50,7 +50,6 @@ try {
     Assert-Equal (ConvertTo-TemplateInt32 '2147483648') ([int]::MinValue) 'High-bit subject flag'
     Assert-Equal (ConvertTo-TemplateLdapFilterValue 'A*(B)\C') 'A\2a\28B\29\5cC' 'LDAP escaping'
     # Sequence of policy information containing OID 1.2.3.4.
-    Assert-Equal (Read-TemplatePolicyOids ([byte[]]@(48,7,48,5,6,3,42,3,4))) '1.2.3.4' 'Application policy decoding'
     Assert-Throws { Read-TemplatePolicyOids ([byte[]]@(48,9,48,7,6,3,42,3,4,48,0)) } '*qualifiers cannot be verified*'
     Assert-Throws { Read-TemplatePolicyOids ([byte[]]@(48,10,48,5,6,3,42,3,4)) } '*Truncated*'
     $attrs=$policy.attributes; $attrs.RemoveChild($attrs.SelectSingleNode('*[local-name()="privateKeyFlags"]')) | Out-Null

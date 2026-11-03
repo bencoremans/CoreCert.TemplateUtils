@@ -1,4 +1,6 @@
-﻿# Internal helpers. Verification reads raw LDAP, independently of CertEnroll's save path.
+﻿. (Join-Path $PSScriptRoot 'TemplatePolicyLibrary.ps1')
+
+# Internal helpers. Verification reads raw LDAP, independently of CertEnroll's save path.
 function ConvertTo-TemplateInt32 {
     param($Value)
     [long]$number = [long]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture)
@@ -27,11 +29,11 @@ function Read-TemplateDerElement {
     $end = [int]($position + $length)
     [byte[]]$value = @(); if ($length) { $value = $Bytes[$position..($end - 1)] }
     $Offset.Value = $end
-    [pscustomobject]@{ Tag = $tag; Value = $value; Raw = [byte[]]$Bytes[$start..($end - 1)] }
+    [pscustomobject]@{ Tag = $tag; Value = $value }
 }
 
 function Read-TemplatePolicyOids {
-    param([byte[]]$Bytes)
+    param([byte[]]$Bytes, [string]$ExtensionOid = '2.5.29.32')
     $offset = 0; $outer = Read-TemplateDerElement $Bytes ([ref]$offset)
     if ($outer.Tag -ne 48 -or $offset -ne $Bytes.Length) { throw 'Invalid policy extension DER.' }
     $offset = 0
@@ -42,10 +44,16 @@ function Read-TemplatePolicyOids {
         if ($oid.Tag -ne 6) { throw 'Expected policy OID.' }
         # Qualifiers may depend on forest OID registrations; do not claim they were verified.
         if ($inner -ne $policy.Value.Length) { throw 'Policy qualifiers cannot be verified from template LDAP attributes. Import stopped before writing.' }
-        if ($oid.Raw.Length -gt 127) { throw 'Policy OID is too long.' }
-        $eku = [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new()
-        $eku.CopyFrom([Security.Cryptography.X509Certificates.X509Extension]::new('2.5.29.37', [byte[]](@(48, $oid.Raw.Length) + $oid.Raw), $false))
-        foreach ($item in $eku.EnhancedKeyUsages) { $item.Value }
+    }
+    # Keep the structural/qualifier check above. pkix.net handles decoding the OIDs.
+    Import-TemplatePolicyLibrary 'Template policy verification'
+    $encoded = [Security.Cryptography.AsnEncodedData]::new($Bytes)
+    if ($ExtensionOid -eq '1.3.6.1.4.1.311.21.10') {
+        $extension = [SysadminsLV.PKI.Cryptography.X509Certificates.X509ApplicationPoliciesExtension]::new($encoded, $false)
+        foreach ($item in $extension.ApplicationPolicies) { $item.Value }
+    } else {
+        $extension = [SysadminsLV.PKI.Cryptography.X509Certificates.X509CertificatePoliciesExtension]::new($encoded, $false)
+        foreach ($item in $extension.Policies) { $item.PolicyOid.Value }
     }
 }
 
@@ -122,8 +130,8 @@ function Get-TemplateXmlExpectation {
                 $decoded = [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new(); $decoded.CopyFrom($raw)
                 $expected['pKIExtendedKeyUsage'] = @($decoded.EnhancedKeyUsages | ForEach-Object { $_.Value })
             }
-            '1.3.6.1.4.1.311.21.10' { $expected['msPKI-Certificate-Application-Policy'] = @(Read-TemplatePolicyOids $bytes) }
-            '2.5.29.32' { $expected['msPKI-Certificate-Policy'] = @(Read-TemplatePolicyOids $bytes) }
+            '1.3.6.1.4.1.311.21.10' { $expected['msPKI-Certificate-Application-Policy'] = @(Read-TemplatePolicyOids $bytes $oid) }
+            '2.5.29.32' { $expected['msPKI-Certificate-Policy'] = @(Read-TemplatePolicyOids $bytes $oid) }
             '2.5.29.19' {
                 $expected['BasicConstraintsPresent'] = $true
                 $decoded = [Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new(); $decoded.CopyFrom($raw)

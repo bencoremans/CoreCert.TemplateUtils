@@ -1,4 +1,6 @@
-﻿
+﻿. (Join-Path $PSScriptRoot 'TemplatePolicyLibrary.ps1')
+
+
 <#
 .SYNOPSIS
     Exports one or more certificate templates to an MS-XCEP XML string.
@@ -45,15 +47,7 @@ function Export-ADCSTemplate {
         $Template
     )
 
-    if (-not (Get-Module -Name PSPKI -ErrorAction SilentlyContinue)) {
-        try {
-            Import-Module -Name PSPKI -ErrorAction Stop
-        } catch {
-            throw [InvalidOperationException]::new(
-                "Export-ADCSTemplate requires PSPKI and could not load it. Install it with 'Install-Module PSPKI', then retry. Loader error: $($_.Exception.Message)",
-                $_.Exception)
-        }
-    }
+    Import-TemplatePolicyLibrary 'Export-ADCSTemplate'
 
     # Normalize to array for consistent iteration
     if ($Template -is [hashtable] -or ($Template.PSObject.Properties.Name -contains 'templatePSPKI')) {
@@ -293,7 +287,19 @@ function Export-ADCSTemplate {
     <extensions>
 "@)
 
-        foreach ($ext in $temp.templatePSPKI.Settings.Extensions) {
+        # PSPKI can derive Application Policies from EKUs. Use the actual AD list instead.
+        $applicationPolicyOid = '1.3.6.1.4.1.311.21.10'
+        $extensions = @($temp.templatePSPKI.Settings.Extensions | Where-Object { $_.Oid.Value -ne $applicationPolicyOid })
+        $applicationPolicies = [Security.Cryptography.OidCollection]::new()
+        foreach ($value in $temp.templateADO.'msPKI-Certificate-Application-Policy') {
+            if ([string]$value -notmatch '^\d+(\.\d+)+$') { throw "Invalid application policy OID '$value'." }
+            [void]$applicationPolicies.Add([Security.Cryptography.Oid]::new([string]$value))
+        }
+        if ($applicationPolicies.Count) {
+            $critical = $applicationPolicyOid -in $temp.templateADO.pKICriticalExtensions
+            $extensions += [SysadminsLV.PKI.Cryptography.X509Certificates.X509ApplicationPoliciesExtension]::new($applicationPolicies, $critical)
+        }
+        foreach ($ext in $extensions) {
             $extID    = Get-OIDid ($ext.Oid) $ExtensionAttributeGroup
             $critical = $ext.Critical.ToString().ToLower()
             $value    = [Convert]::ToBase64String($ext.RawData)

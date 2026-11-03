@@ -10,7 +10,7 @@ This module builds on that foundation with:
 
 - **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create via COM) or already exists (diff → write supported changed attributes via LDAP → advance revision without downgrading → verify). No separate update step needed.
 - **Multi-tenant name override**: import the same XML under a different name per customer/forest.
-- **No AD module required**: all functions use `System.DirectoryServices` directly. Only `Export-ADCSTemplate` requires PSPKI.
+- **No AD module required**: all functions use `System.DirectoryServices` directly. PSPKI is needed for export and for import verification of Application Policies or Certificate Policies.
 
 ---
 
@@ -18,7 +18,7 @@ This module builds on that foundation with:
 
 - PowerShell 5.1 or newer
 - Windows Server 2008 R2 / Windows 7 or newer (CertEnroll COM for import)
-- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI -AllowClobber`) — required **only** for `Export-ADCSTemplate`; loaded automatically when needed
+- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI -AllowClobber`) — required for export and for imports containing Application Policies or Certificate Policies; loaded automatically when needed
 - Enterprise Administrator permissions (templates are stored in the AD Configuration partition)
 
 ---
@@ -109,7 +109,7 @@ $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding UTF8
 
 **Requires:** an installed PSPKI module (`Install-Module PSPKI`). The export function loads
 PSPKI on demand if it is not already loaded. It does not install PSPKI or force a reload.
-Module import and the Get/Import/Remove functions do not load PSPKI. Loading failures retain
+Import verification loads PSPKI on demand when decoding Application Policies or Certificate Policies. Module import, Get and Remove do not load PSPKI. Loading failures retain
 the underlying error message. The input still requires the existing PSPKI and AD objects;
 this change does not add template lookup by name to the export function.
 
@@ -280,7 +280,7 @@ Original export/import technique by [Vadims Podans](https://www.sysadmins.lv/). 
 
 ## Export fidelity and validation
 
-Export requires both the PSPKI template object and the full `Get-ADCSTemplate` object.
+Export requires both the PSPKI template object and the full `Get-ADCSTemplate` object. EKUs use the PSPKI extension. Application Policies are encoded separately with pkix.net from LDAP `msPKI-Certificate-Application-Policy`, with criticality from `pKICriticalExtensions`. An absent application-policy attribute does not copy the EKU list.
 The AD object supplies the original private-key flags and the exact binary validity/renewal
 intervals. Intervals that cannot be represented as whole MS-XCEP seconds are rejected;
 they are never rounded or reconstructed from display text.
@@ -307,7 +307,7 @@ Expectations come from the input XML, including `-Name` and `-DisplayName` overr
 For an existing template, a newer source revision is adopted. Changed content with an
 equal/older source advances the current minor revision; unchanged content preserves the
 current revision. Repeated import therefore does not keep increasing or lowering it.
-An explicit `-Version` downgrade is rejected. The effective revision is verified. Verification does not depend on PSPKI or CertEnroll's in-memory result.
+An explicit `-Version` downgrade is rejected. The effective revision is verified. Verification compares the XML with fresh LDAP data. Application Policies and Certificate Policies are decoded using the pkix.net classes shipped with PSPKI.
 
 | Checked settings | Comparison |
 |---|---|
@@ -396,3 +396,5 @@ RSA/KSP, ECC and schema 3/4 on the intended Windows versions, actual enrollment 
 OID deletion in an isolated forest. No automatic merge or deployment is performed.
 
 Dependency tests cover loading PSPKI on demand, reusing a loaded module, preserving loader errors, and importing CoreCert.TemplateUtils without loading PSPKI.
+
+Run `powershell.exe -NoProfile -File .\tests\Policy-RoundTrip.Tests.ps1` with PSPKI installed to exercise the real extension classes without AD writes. The test also accepts `-LibraryPath` pointing to the PSPKI DLL directory for isolated offline testing.

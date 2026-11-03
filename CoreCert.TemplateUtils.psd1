@@ -18,6 +18,7 @@
         'Get-ADCSTemplate.ps1',
         'Import-ADCSTemplate.ps1',
         'TemplateVerification.ps1',
+        'TemplatePolicyLibrary.ps1',
         'TemplateDirectory.ps1',
         'Remove-ADCSTemplate.ps1',
         'README.md'

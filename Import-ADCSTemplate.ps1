@@ -51,6 +51,7 @@
     Requires Enterprise Administrator permissions.
     COM interfaces require Windows Server 2008 R2 / Windows 7 or newer.
     Update path uses System.DirectoryServices -- no ActiveDirectory module required.
+    Verification of Application Policies or Certificate Policies loads PSPKI on demand.
 #>
 . (Join-Path $PSScriptRoot 'TemplateVerification.ps1')
 . (Join-Path $PSScriptRoot 'TemplateDirectory.ps1')
