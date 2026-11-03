@@ -9,7 +9,7 @@
 
     Each template requires both the PSPKI template object (Get-CertificateTemplate) and the
     AD object (Get-ADCSTemplate) as input. The AD object supplies attributes not available
-    through PSPKI alone (e.g. msPKI-Private-Key-Flag).
+    through PSPKI alone (msPKI-Private-Key-Flag and exact validity/renewal intervals).
 
 .PARAMETER Template
     One or more hashtables with keys:
@@ -32,7 +32,7 @@
         }
     }
     $xml = Export-ADCSTemplate -Template $templates
-    $xml | Set-Content ".\templates\CC-Templates.xml" -Encoding ASCII
+    $xml | Set-Content ".\templates\CC-Templates.xml" -Encoding UTF8
 
 .NOTES
     Requires the PSPKI module (Install-Module PSPKI).
@@ -96,16 +96,42 @@ function Export-ADCSTemplate {
         return $script:oids.Count
     }
 
-    function Get-Seconds {
-        param([Parameter(Mandatory = $true)][string]$str)
-        if (-not ($str -match "(\d+)\s(\w+)")) {
-            Write-Error "Input string does not match expected format ('number unit')."; return
+    function ConvertTo-XmlText {
+        param([AllowNull()][string]$Value)
+        if ($null -eq $Value) { return '' }
+        [void][System.Xml.XmlConvert]::VerifyXmlChars($Value)
+        return [System.Security.SecurityElement]::Escape($Value)
+    }
+
+    function Get-ADPeriodSeconds {
+        param($Object, [string]$Attribute)
+        $property = $Object.PSObject.Properties[$Attribute]
+        if ($null -eq $property -or $null -eq $property.Value) {
+            throw "Missing AD attribute '$Attribute'. Supply the full Get-ADCSTemplate object."
         }
-        $period = [int]$matches[1]
-        $units  = $matches[2].ToLower()
-        $map = @{ hours = 3600; days = 86400; weeks = 604800; months = 2592000; years = 31536000 }
-        if ($map.ContainsKey($units)) { return $period * $map[$units] }
-        Write-Error "Unrecognized time unit: $units"
+        [byte[]]$bytes = $property.Value
+        if ($bytes.Length -ne 8) { throw "AD attribute '$Attribute' must contain eight bytes." }
+        [long]$ticks = [BitConverter]::ToInt64($bytes, 0)
+        if ($ticks -gt 0 -or ($ticks % [TimeSpan]::TicksPerSecond) -ne 0) {
+            throw "AD attribute '$Attribute' must be a nonpositive interval in whole seconds; refusing to round."
+        }
+        return (-[decimal]$ticks / [TimeSpan]::TicksPerSecond).ToString('0', [Globalization.CultureInfo]::InvariantCulture)
+    }
+
+    function Get-TemplateProviders {
+        param($Cryptography)
+        # PSPKI versions expose different property names. Missing is not the same as an empty list.
+        $property = $Cryptography.PSObject.Properties['ProviderList']
+        if ($null -eq $property) { $property = $Cryptography.PSObject.Properties['CSPList'] }
+        if ($null -eq $property) {
+            throw 'PSPKI cryptography object has neither ProviderList nor CSPList. Refusing to export an unrestricted provider list.'
+        }
+        foreach ($provider in $property.Value) {
+            if ($provider -isnot [string] -or [string]::IsNullOrWhiteSpace($provider)) {
+                throw 'PSPKI returned an invalid provider name.'
+            }
+            $provider
+        }
     }
 
     $SB = New-Object Text.StringBuilder
@@ -122,13 +148,31 @@ function Export-ADCSTemplate {
     $script:oids = @()
 
     foreach ($temp in $Template) {
+        # The two objects must describe the same source template.
+        if ([string]$temp.templatePSPKI.Name -cne [string]$temp.templateADO.Name) {
+            throw 'PSPKI and AD template names differ.'
+        }
+        $privateFlags = $temp.templateADO.PSObject.Properties['msPKI-Private-Key-Flag']
+        if ($null -eq $privateFlags -or $null -eq $privateFlags.Value) {
+            throw 'Missing AD msPKI-Private-Key-Flag; refusing to substitute zero.'
+        }
+        $crypto = $temp.templatePSPKI.Settings.Cryptography
+        foreach ($required in @('MinimalKeyLength', 'KeySpec', 'CNGKeyUsage', 'KeyAlgorithm', 'HashAlgorithm')) {
+            if ($null -eq $crypto.PSObject.Properties[$required] -or $null -eq $crypto.$required) {
+                throw "Missing PSPKI cryptography property '$required'."
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($crypto.KeyAlgorithm.Value) -or
+            [string]::IsNullOrWhiteSpace($crypto.HashAlgorithm.Value)) {
+            throw 'PSPKI algorithm and hash OIDs must be populated.'
+        }
         [void]$SB.Append("<policy>")
 
         $OID    = New-Object Security.Cryptography.Oid $temp.templatePSPKI.OID.Value, $temp.templatePSPKI.DisplayName
         $tempID = Get-OIDid $OID $EnrollmentObjectGroup
 
-        $validity = Get-Seconds $temp.templatePSPKI.Settings.ValidityPeriod
-        $renewal  = Get-Seconds $temp.templatePSPKI.Settings.RenewalPeriod
+        $validity = Get-ADPeriodSeconds $temp.templateADO 'pKIExpirationPeriod'
+        $renewal  = Get-ADPeriodSeconds $temp.templateADO 'pKIOverlapPeriod'
 
         $KU = if ([int]$temp.templatePSPKI.Settings.Cryptography.CNGKeyUsage -eq 0) {
             '<keyUsageProperty xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
@@ -139,7 +183,7 @@ function Export-ADCSTemplate {
         $PKS = if ([string]::IsNullOrEmpty($temp.templatePSPKI.Settings.Cryptography.PrivateKeySecuritySDDL)) {
             '<permissions xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
         } else {
-            "<permissions>$($temp.templatePSPKI.Settings.Cryptography.PrivateKeySecuritySDDL)</permissions>"
+            "<permissions>$(ConvertTo-XmlText $temp.templatePSPKI.Settings.Cryptography.PrivateKeySecuritySDDL)</permissions>"
         }
 
         $KeyAlgorithm = if ($temp.templatePSPKI.Settings.Cryptography.KeyAlgorithm.Value -eq "1.2.840.113549.1.1.1") {
@@ -153,15 +197,16 @@ function Export-ADCSTemplate {
             '<supersededPolicies xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
         } else {
             $str = "<supersededPolicies>"
-            $temp.templatePSPKI.Settings.SupersededTemplates | ForEach-Object { $str += "<commonName>$_</commonName>" }
+            $temp.templatePSPKI.Settings.SupersededTemplates | ForEach-Object { $str += "<commonName>$(ConvertTo-XmlText $_)</commonName>" }
             $str + "</supersededPolicies>"
         }
 
-        $CSPs = if ($temp.templatePSPKI.Settings.Cryptography.CSPList.Count -eq 0) {
+        $providers = @(Get-TemplateProviders $temp.templatePSPKI.Settings.Cryptography)
+        $CSPs = if ($providers.Count -eq 0) {
             '<cryptoProviders xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
         } else {
             $str = "<cryptoProviders>`n"
-            $temp.templatePSPKI.Settings.Cryptography.CSPList | ForEach-Object { $str += "<provider>$_</provider>`n" }
+            $providers | ForEach-Object { $str += "<provider>$(ConvertTo-XmlText $_)</provider>`n" }
             $str + "</cryptoProviders>"
         }
 
@@ -212,7 +257,7 @@ function Export-ADCSTemplate {
 <policyOIDReference>$tempID</policyOIDReference>
 <cAs><cAReference>0</cAReference></cAs>
 <attributes>
-    <commonName>$($temp.templatePSPKI.Name)</commonName>
+    <commonName>$(ConvertTo-XmlText $temp.templatePSPKI.Name)</commonName>
     <policySchema>$($temp.templatePSPKI.SchemaVersion)</policySchema>
     <certificateValidity>
         <validityPeriodSeconds>$validity</validityPeriodSeconds>
@@ -253,10 +298,13 @@ function Export-ADCSTemplate {
 
     $n = 1
     foreach ($oid in $script:oids) {
-        [void]$SB.Append("<oID><value>$($oid.Value)</value><group>$($oid.Group)</group><oIDReferenceID>$n</oIDReferenceID><defaultName>$($oid.Name)</defaultName></oID>")
+        [void]$SB.Append("<oID><value>$(ConvertTo-XmlText $oid.Value)</value><group>$($oid.Group)</group><oIDReferenceID>$n</oIDReferenceID><defaultName>$(ConvertTo-XmlText $oid.Name)</defaultName></oID>")
         $n++
     }
 
     [void]$SB.Append("</oIDs></GetPoliciesResponse>")
-    return $SB.ToString()
+    # Validate the entire document before returning any XML to the caller.
+    [xml]$document = $SB.ToString()
+    return $document.OuterXml
 }
+

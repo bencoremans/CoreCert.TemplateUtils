@@ -288,7 +288,11 @@ function Import-ADCSTemplate {
             Write-Verbose "Template '$effectiveName' not found in AD. Creating via COM..."
 
             if ($PSCmdlet.ShouldProcess("Template '$effectiveName'", "Import to AD")) {
-                $encoder = New-Object System.Text.ASCIIEncoding
+                # OuterXml may retain an input declaration. Match it to the actual byte encoding.
+                if ($doc.FirstChild -is [System.Xml.XmlDeclaration]) {
+                    $doc.FirstChild.Encoding = 'utf-8'
+                }
+                $encoder = New-Object System.Text.UTF8Encoding($false, $true)
                 $bytes   = $encoder.GetBytes($doc.OuterXml)
 
                 $pol = New-Object -ComObject X509Enrollment.CX509EnrollmentPolicyWebService
@@ -311,3 +315,4 @@ function Import-ADCSTemplate {
         }
     }
 }
+

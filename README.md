@@ -97,7 +97,7 @@ $templates = "CC-WebServer","CC-ClientAuth" | ForEach-Object {
 $xml = Export-ADCSTemplate -Template $templates
 
 # Save to file (version control friendly)
-$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
+$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding UTF8
 ```
 
 **Parameters:**
@@ -216,7 +216,7 @@ $templates = "CC-WebServer","CC-ClientAuth" | ForEach-Object {
 $xml = Export-ADCSTemplate -Template $templates
 
 # Save for version control
-$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding ASCII
+$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding UTF8
 
 # 2. Import into target forest — same names
 Import-ADCSTemplate -XmlString $xml -Server "dc01.target.com"
@@ -262,3 +262,41 @@ Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
 ## Credits
 
 Original export/import technique by [Vadims Podans](https://www.sysadmins.lv/). This module extends his approach with idempotent import/update, multi-tenant name override, comprehensive attribute diffing, and template cleanup support.
+
+
+## Export fidelity and validation
+
+Export requires both the PSPKI template object and the full `Get-ADCSTemplate` object.
+The AD object supplies the original private-key flags and the exact binary validity/renewal
+intervals. Intervals that cannot be represented as whole MS-XCEP seconds are rejected;
+they are never rounded or reconstructed from display text.
+
+Text is XML-escaped and the completed document is parsed before it is returned. Provider
+names use `ProviderList`, with `CSPList` as a compatibility fallback. A missing property
+is an error; an existing empty list still means no explicit provider restriction.
+
+Save and read XML explicitly as UTF-8:
+
+```powershell
+$xml | Set-Content -LiteralPath '.\template.xml' -Encoding UTF8
+$xml = Get-Content -LiteralPath '.\template.xml' -Raw -Encoding UTF8
+Import-ADCSTemplate -XmlString $xml
+```
+
+Template permissions are deliberately configured separately with PSPKI in the destination.
+The exported private-key security descriptor is not the template DACL.
+These checks establish XML serialization fidelity, not a successful AD/CertEnroll round trip.
+Before deployment, compare the source and imported template on Windows, including provider,
+algorithm, key size, request hash, CNG usage, flags, validity and extensions. The existing
+LDAP update still covers only the attributes listed above; it does not repair every crypto
+setting or extension. No automatic post-create LDAP repair is added by this change.
+
+Run the offline regression checks (no AD writes or installed PSPKI required):
+
+```powershell
+powershell.exe -NoProfile -File .\tests\Export-Serialization.Tests.ps1
+```
+
+The fixtures check XML escaping, Unicode, both provider property names, exact AD intervals,
+raw flags and extension bytes, plus rejection of missing/inconsistent source data. They do
+not replace Windows PowerShell 5.1 tests with real PSPKI objects and CertEnroll in a lab.
