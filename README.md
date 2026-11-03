@@ -8,7 +8,7 @@ Vadims Podans ([@Crypt32](https://github.com/Crypt32)) discovered that the COM i
 
 This module builds on that foundation with:
 
-- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create via COM) or already exists (diff → write supported changed attributes via LDAP → set source version → verify). No separate update step needed.
+- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create via COM) or already exists (diff → write supported changed attributes via LDAP → advance revision without downgrading → verify). No separate update step needed.
 - **Multi-tenant name override**: import the same XML under a different name per customer/forest.
 - **No AD module required**: all functions use `System.DirectoryServices` directly. Only `Export-ADCSTemplate` requires PSPKI.
 
@@ -48,22 +48,23 @@ A single function that handles the full lifecycle:
 | Situation | Behaviour |
 |-----------|-----------|
 | Template does **not** exist | Create via `CX509CertificateTemplateADWritable` COM (new OID minted automatically) |
-| Template **exists** (same name) | Diff supported XCEP attributes; update via LDAP; set source version; verify |
+| Template **exists** (same name) | Diff supported XCEP attributes; update via LDAP; advance revision without downgrading; verify |
 | No changes detected | Read back and verify; nothing written |
 
-**Attributes compared in the update path:**
+**Attributes written by the update path:**
 
 | Category | Attributes |
 |----------|-----------|
 | Integer flags | `msPKI-Private-Key-Flag`, `msPKI-Certificate-Name-Flag`, `msPKI-Enrollment-Flag`, `flags`, `msPKI-Template-Schema-Version`, `pKIDefaultKeySpec`, `msPKI-Minimal-Key-Size`, `msPKI-RA-Signature` |
 | Binary periods | `pKIExpirationPeriod` (validity), `pKIOverlapPeriod` (renewal) |
+| Display name | `displayName` |
 | Version | `revision`, `msPKI-Template-Minor-Revision` |
 
-> **Note:** `pKIExtendedKeyUsage`, `msPKI-Certificate-Application-Policy`, and `pKICriticalExtensions` are set by the COM layer during create and are embedded in extension blobs — not separately represented in MS-XCEP XML. Verification checks these values after create, update and no-op. The updater does not repair them: a difference is a terminating error requiring a separate, deliberate correction.
+> **Note:** `pKIExtendedKeyUsage`, `msPKI-Certificate-Application-Policy`, and `pKICriticalExtensions` are set by the COM layer during create and are embedded in extension blobs — not separately represented in MS-XCEP XML. Verification checks these values after creation and on existing templates. The updater does not repair them: unsupported differences terminate before changing that template. Correct them separately before retrying.
 
 ### Multi-tenant / multi-forest name override
 
-Use `-Name` and `-DisplayName` to override the template identity in memory before import. The source XML on disk is never modified. A new OID is always minted by the COM layer on create.
+Use `-Name` and `-DisplayName` to override the template identity in memory before import. The source XML on disk is never modified. On create, the importer supplies a temporary unique OID to MS-XCEP; CertEnroll performs the final registration.
 
 ```powershell
 # Same XML, different name per customer
@@ -177,7 +178,16 @@ $t.nTSecurityDescriptor
 
 ### `Remove-ADCSTemplate`
 
-Removes a certificate template **and** its OID registration from AD. Both must be removed to allow clean re-import via COM (`CX509CertificateTemplateADWritable.Commit()` checks OID uniqueness).
+Resolves the template's exact `msPKI-Cert-Template-OID` and looks for a unique registration
+with `flags=1`. Display names are never used to select an OID. Shared OIDs, ambiguous
+registrations and non-template OID types stop the operation before deletion.
+
+One `ShouldProcess` decision covers both deletes. `-WhatIf` and declined confirmation
+perform no deletes. A missing template returns without deleting anything; a missing OID
+allows template-only removal. The LDAP deletes are sequential, **not atomic**. If the
+second delete fails, the error identifies the remaining OID and no full-success message
+is emitted. Avoid concurrent administrative changes during removal. This is not an
+orphan-scanning tool and does not remove unrelated OID registrations.
 
 ```powershell
 # Remove (prompts for confirmation)
@@ -196,7 +206,7 @@ Remove-ADCSTemplate -Name "CC-WebServer" -WhatIf
 |-----------|------|----------|-------------|
 | `-Name` | `string` | Yes | CN of the template to remove |
 | `-Server` | `string` | No | Target DC FQDN |
-| `-Domain` | `string` | No | Domain DN (auto-discovered if not specified) |
+| `-Domain` | `string` | No | Compatibility parameter; configuration context is read from the selected DC. |
 
 ---
 
@@ -243,7 +253,7 @@ Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
 
 ---
 
-## Tested on
+## Prior module testing
 
 - Windows Server 2019 / 2022
 - PowerShell 5.1
@@ -289,8 +299,11 @@ The exported private-key security descriptor is not the template DACL.
 
 Before returning success, `Import-ADCSTemplate` reads fresh LDAP data from the same DC
 used for the write. This also runs when the update comparison finds nothing to change.
-Expectations come from the input XML, including `-Name`, `-DisplayName` and `-Version`
-overrides. Verification does not depend on PSPKI or CertEnroll's in-memory result.
+Expectations come from the input XML, including `-Name` and `-DisplayName` overrides.
+For an existing template, a newer source revision is adopted. Changed content with an
+equal/older source advances the current minor revision; unchanged content preserves the
+current revision. Repeated import therefore does not keep increasing or lowering it.
+An explicit `-Version` downgrade is rejected. The effective revision is verified. Verification does not depend on PSPKI or CertEnroll's in-memory result.
 
 | Checked settings | Comparison |
 |---|---|
@@ -334,7 +347,7 @@ copy of every source directory attribute. Enrollment remains a separate lab chec
 
 `-WhatIf` performs no writes or verification of a proposed create/update. A genuine no-op
 can still read and verify the existing template. A display-name difference on an existing
-template is detected but not repaired by the current updater.
+template is updated and verified.
 
 Run the offline regression checks (no AD writes or installed PSPKI required):
 
@@ -342,6 +355,7 @@ Run the offline regression checks (no AD writes or installed PSPKI required):
 powershell.exe -NoProfile -File .\tests\Export-Serialization.Tests.ps1
 powershell.exe -NoProfile -File .\tests\Import-Verification.Tests.ps1
 powershell.exe -NoProfile -File .\tests\Import-ControlFlow.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Review-Fixes.Tests.ps1
 ```
 
 The fixtures check XML escaping, Unicode, both provider property names, exact AD intervals,
@@ -354,8 +368,24 @@ malformed crypto metadata, unsigned flags, unsupported extensions and structured
 Control-flow tests replace AD/COM boundaries with test doubles and exercise create,
 update, no-op, multi-policy isolation, pinned DC selection and WhatIf.
 
-The new verification has been tested offline on PowerShell 7.4/Linux only. The existing
-"Tested on" list above describes the prior module, not validation of this change. Before
+The new verification has been tested offline on PowerShell 7.4/Linux only. The
+"Prior module testing" list above describes the prior module, not validation of this change. Before
 merging, test on Windows PowerShell 5.1 with RSA/CSP, RSA/KSP and ECC schema 3/4 templates,
 including actual readback and enrollment. Include a deliberate non-updatable difference
 (e.g. EKU) and confirm that re-import terminates instead of reporting success.
+
+## Review tracking (2.3.0 draft)
+
+| Issue | Implemented changes | Regression coverage |
+|---|---|---|
+| [#3](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/3) | Exact OID ownership, ambiguity/shared-use rejection, one confirmation, partial failure reporting | Wrong type, duplicate registration, shared reference, missing objects, WhatIf, failed second delete |
+| [#4](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/4) | Literal LDAP filters, forest context on a pinned DC, paging, resource disposal and terminating read errors | Get/Remove special-character names, import DC/context selection and read failure |
+| [#5](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/5) | Preflight every policy, required values, namespaces, OID groups, ranges, unsigned flags and one COM policy per create | Invalid second policy causes zero writes; invalid version, namespace/DTD, group and high-bit flags |
+| [#6](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/6) | Display name, non-decreasing revisions, idempotence and unsupported-difference detection before updates | Content/display changes, repeat import, downgrade/overflow and no partial unsupported update |
+| [#7](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/7) | Export fidelity, local OID table keyed by value+group, independent LDAP readback and explicit verification limits | Serialization, OID-group collision, crypto/extension drift and missing values |
+| [#8](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/8) | Packaging, documentation and four offline suites | Manifest import/export checks and PowerShell parsing |
+
+All six issues are implemented in PR #2 and remain open until merge. This is a draft,
+not a release tested in AD. Lab validation must cover Windows PowerShell 5.1, RSA/CSP,
+RSA/KSP, ECC and schema 3/4 on the intended Windows versions, actual enrollment and
+OID deletion in an isolated forest. No automatic merge or deployment is performed.

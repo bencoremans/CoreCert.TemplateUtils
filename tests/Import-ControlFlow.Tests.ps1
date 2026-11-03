@@ -1,15 +1,19 @@
-# Executes the importer's control flow with explicit AD/COM test doubles.
+﻿# Executes the importer's control flow with explicit AD/COM test doubles.
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Export-Serialization.Tests.ps1')
 . (Join-Path $PSScriptRoot '../TemplateVerification.ps1')
+. (Join-Path $PSScriptRoot '../TemplateDirectory.ps1')
+. (Join-Path $PSScriptRoot 'Import-Verification.Tests.ps1')
 $stub=New-Module -Name PSPKI -ScriptBlock {}; Import-Module $stub
 try {
     $source=Get-Content (Join-Path $PSScriptRoot '../Import-ADCSTemplate.ps1') -Raw
-    $source=$source.Replace(". (Join-Path `$PSScriptRoot 'TemplateVerification.ps1')",'')
+    $source=$source.Replace(". (Join-Path `$PSScriptRoot 'TemplateVerification.ps1')",'').Replace(". (Join-Path `$PSScriptRoot 'TemplateDirectory.ps1')",'')
     $start=$source.IndexOf('        if ('); $end=$source.IndexOf('        #region Helper:', $start)
     $source=$source.Remove($start,$end-$start).Replace('[ADSI]','[object]')
+    $source=$source.Replace('$searcher.SearchRoot.Dispose();', '')
     $source=$source.Replace('$rootDse = [object]"LDAP://$Server/RootDSE"','$rootDse = New-TestRoot')
     . ([scriptblock]::Create($source))
+    function Get-TemplateDirectoryContext { param($Server); [pscustomobject]@{Server=$Server; TemplateBase='CN=Certificate Templates,CN=Public Key Services,CN=Services,CN=Configuration,DC=forest,DC=test'} }
     function New-TestRoot {
         $o=[pscustomobject]@{configurationNamingContext='CN=Configuration,DC=forest,DC=test'}
         $o | Add-Member ScriptMethod Dispose {}; return $o
@@ -19,6 +23,7 @@ try {
     function Assert-TemplateVerification {
         param($Expected,$Server,$TemplateBase)
         $script:verifications++
+        $script:lastExpected=$Expected
         Assert-Equal $Server 'dc.child.test' 'Verify on commit DC'
         Assert-Equal $TemplateBase 'CN=Certificate Templates,CN=Public Key Services,CN=Services,CN=Configuration,DC=forest,DC=test' 'Forest configuration context'
         if ($script:fail) { throw 'Verification failed (test double)' }
@@ -27,7 +32,7 @@ try {
         param([Parameter(Position=0)][string]$TypeName, [Parameter(Position=1)][object[]]$ArgumentList, [string]$ComObject)
         if ($TypeName -eq 'System.DirectoryServices.DirectorySearcher') {
             $o=[pscustomobject]@{SearchRoot=$null;Filter=$null;SearchScope=$null}
-            $o | Add-Member ScriptMethod FindOne { return $script:existing }; return $o
+            $o | Add-Member ScriptMethod FindOne { return $script:existing }; $o | Add-Member ScriptMethod Dispose {}; return $o
         }
         if ($ComObject -eq 'X509Enrollment.CX509EnrollmentPolicyWebService') {
             $o=[pscustomobject]@{Document=$null}
@@ -77,10 +82,12 @@ try {
         $properties[$key]=$item
     }
     $entry=[pscustomobject]@{Properties=$properties}
+    $entry | Add-Member ScriptMethod Dispose {}
     $entry | Add-Member ScriptMethod CommitChanges { $script:writes++ }
     $script:testEntry=$entry
     $script:existing=[pscustomobject]@{}
     $script:existing | Add-Member ScriptMethod GetDirectoryEntry { return $script:testEntry }
+    function Read-TemplateVerificationState { New-ActualFixture }
     $script:writes=0; $script:verifications=0
     Import-ADCSTemplate (Export-ADCSTemplate $first) -Server dc.child.test | Out-Null
     Assert-Equal $script:writes 0 'No-op does not write'
@@ -93,5 +100,23 @@ try {
     Assert-Equal $script:writes 1 'Changed key size writes'
     Assert-Equal $script:verifications 1 'Update verifies after commit'
     Assert-Equal $entry.Properties['msPKI-Minimal-Key-Size'].Value 4096 'Update applied'
-    'PASS: import control flow tests'
+    Assert-Equal $script:lastExpected['msPKI-Template-Minor-Revision'] 3 'Verify bumped revision'
+    $script:writes=0
+    Import-ADCSTemplate (Export-ADCSTemplate $first) -Server dc.child.test | Out-Null
+    Assert-Equal $script:writes 0 'Repeat import does not downgrade or increment again'
+    Import-ADCSTemplate (Export-ADCSTemplate $first) -Server dc.child.test -DisplayName 'Renamed' | Out-Null
+    Assert-Equal $entry.Properties['displayName'].Value 'Renamed' 'Display override saved'
+    Assert-Equal $script:lastExpected['msPKI-Template-Minor-Revision'] 4 'Display change advances revision'
+    $script:writes=0
+    function Read-TemplateVerificationState { $a=New-ActualFixture; $a['pKIExtendedKeyUsage']=@('1.2.3'); return $a }
+    Assert-Throws { Import-ADCSTemplate (Export-ADCSTemplate $first) -Server dc.child.test } '*Unsupported update differences*'
+    Assert-Equal $script:writes 0 'Unsupported differences do not partially write'
+    $script:existing=$null; $script:writes=0
+    [xml]$bad=Export-ADCSTemplate @($first,$second)
+    $bad.GetPoliciesResponse.response.policies.policy[1].attributes.revision.minorRevision='bad'
+    Assert-Throws { Import-ADCSTemplate $bad.OuterXml -Server dc.child.test } '*Invalid nonnegative*'
+    Assert-Equal $script:writes 0 'Invalid second policy stops first write'
+    Assert-Throws { Import-ADCSTemplate $xml -Server dc.child.test -Version '999999999999.0' } '*Invalid -Version range*'
+    Assert-Equal $script:writes 0 'Invalid version stops all writes'
+    'PASS: import control flow tests' 
 } finally { Remove-Module $stub; Remove-Item Function:New-Object -ErrorAction SilentlyContinue }

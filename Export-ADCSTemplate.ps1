@@ -1,4 +1,4 @@
-
+﻿
 <#
 .SYNOPSIS
     Exports one or more certificate templates to an MS-XCEP XML string.
@@ -84,16 +84,15 @@ function Export-ADCSTemplate {
             [int]$group
         )
         if (-not $OID.Value) { Write-Error "OID Value is required."; return }
-        if (-not (Test-Path Variable:script:oids)) { $script:oids = @() }
-        for ($i = 0; $i -lt $script:oids.Count; $i++) {
-            if ($script:oids[$i].Value -eq $OID.Value) { return $i + 1 }
+        for ($i = 0; $i -lt $oids.Count; $i++) {
+            if ($oids[$i].Value -eq $OID.Value -and $oids[$i].Group -eq $group) { return $i + 1 }
         }
-        $script:oids += [PSCustomObject]@{
+        $oids.Add([PSCustomObject]@{
             Value = $OID.Value
             Group = $group
             Name  = if ($OID.FriendlyName) { $OID.FriendlyName } else { "Unknown" }
-        }
-        return $script:oids.Count
+        })
+        return $oids.Count
     }
 
     function ConvertTo-XmlText {
@@ -145,7 +144,7 @@ function Export-ADCSTemplate {
         <policies>
 "@)
 
-    $script:oids = @()
+    $oids = [Collections.Generic.List[object]]::new()
 
     foreach ($temp in $Template) {
         # The two objects must describe the same source template.
@@ -210,8 +209,12 @@ function Export-ADCSTemplate {
             $str + "</cryptoProviders>"
         }
 
-        [void]($temp.templatePSPKI.Version -match "(\d+)\.(\d+)")
+        if ([string]$temp.templatePSPKI.Version -notmatch '^(\d+)\.(\d+)$') { throw 'Invalid source template version.' }
         $major = $matches[1]; $minor = $matches[2]
+        foreach ($part in @($major,$minor)) {
+            [int]$parsed=0
+            if (-not [int]::TryParse($part,[ref]$parsed) -or $parsed -lt 0) { throw 'Invalid source template version range.' }
+        }
 
         $hash = if ($temp.templatePSPKI.Settings.Cryptography.HashAlgorithm.Value -eq "1.3.14.3.2.26") {
             '<hashAlgorithmOIDReference xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
@@ -297,7 +300,7 @@ function Export-ADCSTemplate {
     [void]$SB.Append("</policies></response><oIDs>")
 
     $n = 1
-    foreach ($oid in $script:oids) {
+    foreach ($oid in $oids) {
         [void]$SB.Append("<oID><value>$(ConvertTo-XmlText $oid.Value)</value><group>$($oid.Group)</group><oIDReferenceID>$n</oIDReferenceID><defaultName>$(ConvertTo-XmlText $oid.Name)</defaultName></oID>")
         $n++
     }

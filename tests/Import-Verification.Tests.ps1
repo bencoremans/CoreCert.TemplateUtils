@@ -1,4 +1,4 @@
-# Offline behavioral tests; run with PowerShell 5.1+ (no AD or CertEnroll needed).
+﻿# Offline behavioral tests; run with PowerShell 5.1+ (no AD or CertEnroll needed).
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Export-Serialization.Tests.ps1')
 . (Join-Path $PSScriptRoot '../TemplateVerification.ps1')

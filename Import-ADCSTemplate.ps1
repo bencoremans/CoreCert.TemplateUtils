@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Imports certificate templates into Active Directory from an MS-XCEP XML string.
 
@@ -12,7 +12,7 @@
       avoid conflicts with the source template OID already registered in AD.
     - Template DOES exist (same commonName in AD): compare the supported LDAP update attributes against
       the serialized source. If changed: apply in-place LDAP attribute update and
-      set the source revision. After create, update and no-op, independently verify
+      advance the revision without downgrading. After create, update and no-op, independently verify
       the supported XML settings against fresh LDAP data. Differences terminate the import.
 
     Optionally override Name and DisplayName on import to deploy the same base template
@@ -53,6 +53,7 @@
     Update path uses System.DirectoryServices -- no ActiveDirectory module required.
 #>
 . (Join-Path $PSScriptRoot 'TemplateVerification.ps1')
+. (Join-Path $PSScriptRoot 'TemplateDirectory.ps1')
 
 function Import-ADCSTemplate {
     [CmdletBinding(SupportsShouldProcess)]
@@ -86,9 +87,10 @@ function Import-ADCSTemplate {
         #region Helper: convert AD binary period to seconds
         function ConvertFrom-ADPeriod {
             param([byte[]]$Bytes)
-            if ($null -eq $Bytes -or $Bytes.Length -ne 8) { return 0 }
+            if ($null -eq $Bytes -or $Bytes.Length -ne 8) { throw 'Invalid stored AD interval.' }
             $intervals = [BitConverter]::ToInt64($Bytes, 0)
-            [Math]::Abs($intervals) / 10000000
+            if ($intervals -gt 0) { throw 'Invalid positive stored AD interval.' }
+            -[decimal]$intervals / 10000000
         }
         #endregion
     }
@@ -97,27 +99,15 @@ function Import-ADCSTemplate {
         # -----------------------------------------------------------------------
         # Resolve target DC and domain
         # -----------------------------------------------------------------------
-        if (-not $Server) {
-            try {
-                $dc = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain().FindDomainController([System.DirectoryServices.ActiveDirectory.LocatorOptions]::WriteableRequired)
-                $Server = $dc.Name
-                Write-Verbose "Auto-discovered DC: $Server"
-            } catch {
-                throw "DC discovery failed: $($_.Exception.Message)"
-            }
-        }
-
-        # Configuration is forest-wide, including when Server is in a child domain.
-        $rootDse = [ADSI]"LDAP://$Server/RootDSE"
-        try { $configuration = [string]$rootDse.configurationNamingContext } finally { $rootDse.Dispose() }
-        if (-not $configuration) { throw "Cannot read configurationNamingContext from '$Server'." }
+        $context = Get-TemplateDirectoryContext $Server
+        $Server = $context.Server
         $ldapPrefix = "LDAP://$Server/"
-        $tplBase = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configuration"
+        $tplBase = $context.TemplateBase
 
         # -----------------------------------------------------------------------
         # Parse XML
         # -----------------------------------------------------------------------
-        [xml]$doc = $XmlString
+        [xml]$doc = Read-TemplatePolicyDocument $XmlString
 
         # Support single and multi-policy XML
         $policies = @($doc.GetPoliciesResponse.response.policies.policy | Where-Object { $null -ne $_ })
@@ -129,12 +119,21 @@ function Import-ADCSTemplate {
             throw "The -Name parameter cannot be used when the XML contains multiple templates. Import each template separately or omit -Name."
         }
 
+        if ($Version) {
+            if ($Version -notmatch '^(\d+)\.(\d+)$') { throw 'Invalid -Version format; expected major.minor.' }
+            foreach ($part in $Version.Split('.')) {
+                [int]$parsed=0
+                if (-not [int]::TryParse($part,[ref]$parsed) -or $parsed -lt 0) { throw 'Invalid -Version range.' }
+            }
+        }
+        if ($Name -and ([string]::IsNullOrWhiteSpace($Name) -or $Name -match '["+,;<=>]')) { throw 'Invalid -Name.' }
         # Validate every policy before any writes (including extensions we cannot verify).
         $names = @{}
         foreach ($sourcePolicy in $policies) {
             $sourceName = [string]$sourcePolicy.attributes.commonName
             if (-not $sourceName -or $names.ContainsKey($sourceName)) { throw "Missing or duplicate template name '$sourceName'." }
             $names[$sourceName] = $true
+            Assert-TemplatePolicyInput $doc $sourcePolicy
             $null = Get-TemplateXmlExpectation $doc $sourcePolicy ''
         }
 
@@ -142,6 +141,8 @@ function Import-ADCSTemplate {
         # Process each policy
         # -----------------------------------------------------------------------
         foreach ($policy in $policies) {
+            $searcher=$null; $tplEntry=$null; $pol=$null; $adwt=$null; $templates=@()
+            try {
             $attrs        = $policy.attributes
             $originalName = $attrs.commonName
             $effectiveName = if ($Name) { $Name } else { $originalName }
@@ -248,11 +249,26 @@ function Import-ADCSTemplate {
                 # elements in the MS-XCEP XML — they are embedded in the extension blobs which
                 # the COM interfaces parse internally. Differences cause verification failure and require a separate correction.
 
+                if ([string]$tplEntry.Properties['displayName'].Value -cne $effectiveDisplay) { $changedAttrs.Add('displayName') }
+
+                # Fail before mutating this template if a difference is outside the updater's scope.
+                $current = Read-TemplateVerificationState $Server $tplBase $effectiveName
+                $writable = @($intAttrMap.Values | ForEach-Object { $_.ldap }) + @('displayName','pKIExpirationPeriod','pKIOverlapPeriod','revision','msPKI-Template-Minor-Revision')
+                $unsupported = @(Compare-TemplateVerificationState $expected $current | Where-Object { $_.Property -notin $writable })
+                if ($unsupported.Count) {
+                    $error = [InvalidOperationException]::new("Unsupported update differences for '$effectiveName'; nothing written to this template: " + (($unsupported | ForEach-Object { $_.Property }) -join ', '))
+                    $error.Data['Differences'] = $unsupported
+                    throw $error
+                }
+
                 # Version comparison
                 $srcMajor = [int]$attrs.revision.majorRevision
                 $srcMinor = [int]$attrs.revision.minorRevision
-                $versionChanged = ($srcMajor -ne $adRevision) -or ($srcMinor -ne $adMinor)
                 $contentChanged = $changedAttrs.Count -gt 0
+                $nextRevision = Get-TemplateUpdateRevision $adRevision $adMinor $srcMajor $srcMinor $contentChanged ([bool]$Version)
+                $srcMajor = $nextRevision[0]; $srcMinor = $nextRevision[1]
+                $expected['revision']=$srcMajor; $expected['msPKI-Template-Minor-Revision']=$srcMinor
+                $versionChanged = ($srcMajor -ne $adRevision) -or ($srcMinor -ne $adMinor)
 
                 if (-not $versionChanged -and -not $contentChanged) {
                     Assert-TemplateVerification $expected $Server $tplBase
@@ -265,6 +281,9 @@ function Import-ADCSTemplate {
                 if ($contentChanged)  { $changeDesc += "$($changedAttrs.Count) attribute(s): $($changedAttrs -join ', ')" }
 
                 if ($PSCmdlet.ShouldProcess("Template '$effectiveName'", "Update in AD ($($changeDesc -join '; '))")) {
+                    if ($changedAttrs -contains 'displayName') {
+                        $tplEntry.Properties['displayName'].Value = $effectiveDisplay
+                    }
                     # Write integer attributes
                     foreach ($key in ($changedAttrs | Where-Object { $intAttrMap.ContainsKey($_) })) {
                         $ldapAttr = $intAttrMap[$key].ldap
@@ -332,6 +351,13 @@ function Import-ADCSTemplate {
 
                 Assert-TemplateVerification $expected $Server $tplBase
                 Write-Output "Template '$effectiveName' imported and verified successfully."
+            }
+            } finally {
+                if ($null -ne $tplEntry) { $tplEntry.Dispose() }
+                if ($null -ne $searcher) { $searcher.SearchRoot.Dispose(); $searcher.Dispose() }
+                foreach ($com in @($adwt) + @($templates) + @($pol)) {
+                    if ($null -ne $com -and [Runtime.InteropServices.Marshal]::IsComObject($com)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) }
+                }
             }
         }
     }

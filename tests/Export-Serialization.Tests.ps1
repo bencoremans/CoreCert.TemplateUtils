@@ -1,4 +1,4 @@
-# Offline regression tests. No AD, CertEnroll or installed PSPKI required.
+﻿# Offline regression tests. No AD, CertEnroll or installed PSPKI required.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../Export-ADCSTemplate.ps1')
 $stub = New-Module -Name PSPKI -ScriptBlock {}

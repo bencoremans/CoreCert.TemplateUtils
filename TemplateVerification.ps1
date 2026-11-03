@@ -1,4 +1,4 @@
-# Internal helpers. Verification reads raw LDAP, independently of CertEnroll's save path.
+﻿# Internal helpers. Verification reads raw LDAP, independently of CertEnroll's save path.
 function ConvertTo-TemplateInt32 {
     param($Value)
     [long]$number = [long]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture)
@@ -98,6 +98,9 @@ function Get-TemplateXmlExpectation {
         $expected['SymmetricAlgorithm'] = Resolve-Oid $a.keyArchivalAttributes.symmetricAlgorithmOIDReference
         $expected['SymmetricKeyLength'] = ConvertTo-TemplateInt32 $a.keyArchivalAttributes.symmetricAlgorithmKeyLength
     }
+    $expected['KeyUsage'] = 0
+    $expected['BasicConstraintsPresent'] = $false
+    $expected['OcspNoCheck'] = $false
     $expected['pKIExtendedKeyUsage'] = @()
     $expected['msPKI-Certificate-Application-Policy'] = @()
     $expected['msPKI-Certificate-Policy'] = @()
@@ -122,6 +125,7 @@ function Get-TemplateXmlExpectation {
             '1.3.6.1.4.1.311.21.10' { $expected['msPKI-Certificate-Application-Policy'] = @(Read-TemplatePolicyOids $bytes) }
             '2.5.29.32' { $expected['msPKI-Certificate-Policy'] = @(Read-TemplatePolicyOids $bytes) }
             '2.5.29.19' {
+                $expected['BasicConstraintsPresent'] = $true
                 $decoded = [Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new(); $decoded.CopyFrom($raw)
                 $expected['BasicConstraintsCA'] = $decoded.CertificateAuthority
                 $expected['pKIMaxIssuingDepth'] = if ($decoded.HasPathLengthConstraint) { $decoded.PathLengthConstraint } else { -1 }
@@ -169,7 +173,10 @@ function Compare-TemplateVerificationState {
         if ($parts.Count % 3 -ne 0) { throw 'Malformed msPKI-RA-Application-Policies metadata.' }
         for ($i = 0; $i -lt $parts.Count; $i += 3) {
             if ($metadata.ContainsKey($parts[$i])) { throw "Duplicate cryptographic metadata '$($parts[$i])'." }
-            $metadata[$parts[$i]] = $parts[$i + 2]
+            $field=$parts[$i]; $type=$parts[$i+1]
+            $expectedType=if ($field -in @('msPKI-Key-Usage','msPKI-Symmetric-Key-Length')) { 'DWORD' } else { 'PZPWSTR' }
+            if ($field -notin @('msPKI-Asymmetric-Algorithm','msPKI-Hash-Algorithm','msPKI-Key-Security-Descriptor','msPKI-Key-Usage','msPKI-Symmetric-Algorithm','msPKI-Symmetric-Key-Length','msPKI-RA-Application-Policies') -or $type -cne $expectedType) { throw "Unsupported cryptographic metadata '$field' of type '$type'." }
+            $metadata[$field] = $parts[$i + 2]
         }
         $ra = [string]$metadata['msPKI-RA-Application-Policies']
     }
@@ -195,6 +202,7 @@ function Compare-TemplateVerificationState {
     foreach ($key in @('pKIExpirationPeriod', 'pKIOverlapPeriod')) {
         $values[$key] = if ($null -ne $Actual[$key]) { [Convert]::ToBase64String([byte[]]$Actual[$key]) } else { $null }
     }
+    $values['KeyUsage'] = 0
     if ($null -ne $Actual['pKIKeyUsage']) {
         [byte[]]$ku = $Actual['pKIKeyUsage']; [int]$bits = 0
         if ($ku.Length -gt 2) { throw 'Invalid pKIKeyUsage length.' }
@@ -202,6 +210,8 @@ function Compare-TemplateVerificationState {
         $values['KeyUsage'] = $bits
     }
     $values['BasicConstraintsCA'] = (([int]$Actual['flags'] -band 128) -ne 0) -or (([int]$Actual['flags'] -band 2048) -ne 0)
+    $values['BasicConstraintsPresent'] = $values['BasicConstraintsCA'] -or (([int]$Actual['msPKI-Enrollment-Flag'] -band 32768) -ne 0)
+    if ($null -eq $values['pKIMaxIssuingDepth']) { $values['pKIMaxIssuingDepth'] = -1 }
     $values['OcspNoCheck'] = ([int]$Actual['msPKI-Enrollment-Flag'] -band 4096) -ne 0
     foreach ($key in $Expected.Keys) {
         $want = $Expected[$key]; $got = $values[$key]
@@ -231,4 +241,88 @@ function Assert-TemplateVerification {
         throw $exception
     }
     Write-Verbose "Verified '$($Expected['cn'])' against the source XML on '$Server'."
+}
+
+function Read-TemplatePolicyDocument {
+    param([string]$XmlString)
+    $settings=[Xml.XmlReaderSettings]::new(); $settings.DtdProcessing='Prohibit'; $settings.XmlResolver=$null
+    $textReader=[IO.StringReader]::new($XmlString); $reader=[Xml.XmlReader]::Create($textReader,$settings)
+    try { $doc=[Xml.XmlDocument]::new(); $doc.XmlResolver=$null; $doc.Load($reader) } finally { $reader.Dispose(); $textReader.Dispose() }
+    if ($doc.DocumentElement.LocalName -ne 'GetPoliciesResponse' -or $doc.DocumentElement.NamespaceURI -ne 'http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy') { throw 'Expected an MS-XCEP GetPoliciesResponse document.' }
+    $ns=$doc.DocumentElement.NamespaceURI
+    foreach ($element in $doc.SelectNodes('//*')) {
+        if ($element.NamespaceURI -ne $ns) { throw "Unexpected XML namespace on '$($element.LocalName)'." }
+    }
+    foreach ($path in @('/*/*[local-name()="response"]','/*/*[local-name()="oIDs"]','/*/*[local-name()="response"]/*[local-name()="policies"]')) {
+        if ($doc.SelectNodes($path).Count -ne 1) { throw 'Missing or duplicate MS-XCEP document container.' }
+    }
+    return ,$doc
+}
+function Assert-TemplatePolicyInput {
+    param([xml]$Document, $Policy)
+    $ns='http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy'
+    foreach ($element in $Policy.SelectNodes('.//*')) {
+        if ($element.NamespaceURI -ne $ns) { throw "Unexpected namespace on '$($element.LocalName)'." }
+        $nil=$element.GetAttribute('nil','http://www.w3.org/2001/XMLSchema-instance')
+        if ($nil -and $nil -notin @('true','false')) { throw "Invalid nil value on '$($element.LocalName)'." }
+        if ($nil -eq 'true' -and ($element.HasChildNodes -or $element.InnerText)) { throw "Nil element '$($element.LocalName)' contains data." }
+        # XCEP children are singleton except these explicit list containers.
+        if ($element.LocalName -notin @('cryptoProviders','supersededPolicies','rAEKUs','rAPolicies','extensions','cAs')) {
+            $duplicates=@($element.ChildNodes | Where-Object { $_ -is [Xml.XmlElement] } | Group-Object LocalName | Where-Object Count -gt 1)
+            if ($duplicates.Count) { throw "Duplicate XML field in '$($element.LocalName)'." }
+        }
+    }
+    $a=$Policy.attributes
+    foreach ($path in @('commonName','policySchema','certificateValidity','privateKeyAttributes','revision','privateKeyFlags','subjectNameFlags','enrollmentFlags','generalFlags','extensions','rARequirements','keyArchivalAttributes','hashAlgorithmOIDReference','supersededPolicies')) {
+        if (@($a.SelectNodes("*[local-name()='$path']")).Count -ne 1) { throw "Missing required XML field '$path'." }
+    }
+    foreach ($path in @('minimalKeyLength','keySpec','keyUsageProperty','permissions','algorithmOIDReference','cryptoProviders')) {
+        if (@($a.privateKeyAttributes.SelectNodes("*[local-name()='$path']")).Count -ne 1) { throw "Missing required XML field '$path'." }
+    }
+    $name=[string]$a.commonName
+    if ([string]::IsNullOrWhiteSpace($name) -or $name -match '["+,;<=>]') { throw "Invalid template common name '$name'." }
+    foreach ($node in @($a.policySchema,$a.privateKeyAttributes.minimalKeyLength,$a.privateKeyAttributes.keySpec,$a.revision.majorRevision,$a.revision.minorRevision)) {
+        [int]$number=0
+        if (-not [int]::TryParse([string]$node,[ref]$number) -or $number -lt 0) { throw 'Invalid nonnegative template integer.' }
+    }
+    if ([int]$a.policySchema -notin @(1,2,3,4) -or [int]$a.privateKeyAttributes.minimalKeyLength -le 0 -or [int]$a.privateKeyAttributes.keySpec -notin @(0,1,2)) { throw 'Invalid schema, key size or key spec.' }
+    if ($a.rARequirements.GetAttribute('nil','http://www.w3.org/2001/XMLSchema-instance') -ne 'true') {
+        [int]$count=0
+        if (-not [int]::TryParse([string]$a.rARequirements.rASignatures,[ref]$count) -or $count -lt 0) { throw 'Invalid RA signature count.' }
+    }
+    if ($a.keyArchivalAttributes.GetAttribute('nil','http://www.w3.org/2001/XMLSchema-instance') -ne 'true') {
+        [int]$length=0
+        if (-not $a.keyArchivalAttributes.symmetricAlgorithmOIDReference -or -not [int]::TryParse([string]$a.keyArchivalAttributes.symmetricAlgorithmKeyLength,[ref]$length) -or $length -le 0) { throw 'Invalid key archival attributes.' }
+    }
+    $table=@{}
+    foreach ($oid in $Document.GetPoliciesResponse.oIDs.oID) {
+        [int]$id=0
+        if (-not [int]::TryParse([string]$oid.oIDReferenceID,[ref]$id) -or $id -lt 0 -or $table.ContainsKey([string]$id) -or [string]$oid.value -notmatch '^\d+(\.\d+)+$') { throw 'Invalid or duplicate OID table entry.' }
+        $table[[string]$id]=$oid
+    }
+    $templateOid=$table[[string]$Policy.policyOIDReference]
+    if ($null -eq $templateOid -or [string]$templateOid.group -ne '9') { throw 'Missing group-9 template OID reference.' }
+    foreach ($reference in $Policy.SelectNodes('.//*[local-name()="oIDReference" or local-name()="algorithmOIDReference" or local-name()="hashAlgorithmOIDReference" or local-name()="symmetricAlgorithmOIDReference"]')) {
+        if ($reference.GetAttribute('nil','http://www.w3.org/2001/XMLSchema-instance') -eq 'true') { continue }
+        $oid=$table[$reference.InnerText]
+        if ($null -eq $oid) { throw "Unresolved OID reference '$($reference.InnerText)'." }
+        $group=switch ($reference.LocalName) {
+            algorithmOIDReference {3}; hashAlgorithmOIDReference {1}; symmetricAlgorithmOIDReference {2}
+            default { switch ($reference.ParentNode.LocalName) { extension {6}; rAEKUs {7}; rAPolicies {8}; default {throw 'Unknown OID reference context.'} } }
+        }
+        if ([int]$oid.group -ne $group) { throw 'OID reference uses an incorrect group.' }
+    }
+}
+
+function Get-TemplateUpdateRevision {
+    param([int]$CurrentMajor,[int]$CurrentMinor,[int]$SourceMajor,[int]$SourceMinor,[bool]$ContentChanged,[bool]$Explicit)
+    $older=$SourceMajor -lt $CurrentMajor -or ($SourceMajor -eq $CurrentMajor -and $SourceMinor -lt $CurrentMinor)
+    $newer=$SourceMajor -gt $CurrentMajor -or ($SourceMajor -eq $CurrentMajor -and $SourceMinor -gt $CurrentMinor)
+    if ($Explicit -and $older) { throw 'Explicit template revision would downgrade the existing revision.' }
+    if ($newer) { return @($SourceMajor,$SourceMinor) }
+    if ($ContentChanged) {
+        if ($CurrentMinor -eq [int]::MaxValue) { throw 'Template minor revision overflow.' }
+        return @($CurrentMajor,($CurrentMinor+1))
+    }
+    return @($CurrentMajor,$CurrentMinor)
 }
