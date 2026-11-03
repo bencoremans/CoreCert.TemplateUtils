@@ -17,6 +17,7 @@
         'Export-ADCSTemplate.ps1',
         'Get-ADCSTemplate.ps1',
         'Import-ADCSTemplate.ps1',
+        'TemplateVerification.ps1',
         'Remove-ADCSTemplate.ps1',
         'README.md'
     )
@@ -50,3 +51,4 @@
         }
     }
 }
+

@@ -8,7 +8,7 @@ Vadims Podans ([@Crypt32](https://github.com/Crypt32)) discovered that the COM i
 
 This module builds on that foundation with:
 
-- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create via COM) or already exists (diff → write only changed attributes via LDAP → increment version). No separate update step needed.
+- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create via COM) or already exists (diff → write supported changed attributes via LDAP → set source version → verify). No separate update step needed.
 - **Multi-tenant name override**: import the same XML under a different name per customer/forest.
 - **No AD module required**: all functions use `System.DirectoryServices` directly. Only `Export-ADCSTemplate` requires PSPKI.
 
@@ -48,8 +48,8 @@ A single function that handles the full lifecycle:
 | Situation | Behaviour |
 |-----------|-----------|
 | Template does **not** exist | Create via `CX509CertificateTemplateADWritable` COM (new OID minted automatically) |
-| Template **exists** (same name) | Diff XCEP attributes against AD; write only changed attributes via LDAP; increment version |
-| No changes detected | No-op (nothing written) |
+| Template **exists** (same name) | Diff supported XCEP attributes; update via LDAP; set source version; verify |
+| No changes detected | Read back and verify; nothing written |
 
 **Attributes compared in the update path:**
 
@@ -59,7 +59,7 @@ A single function that handles the full lifecycle:
 | Binary periods | `pKIExpirationPeriod` (validity), `pKIOverlapPeriod` (renewal) |
 | Version | `revision`, `msPKI-Template-Minor-Revision` |
 
-> **Note:** `pKIExtendedKeyUsage`, `msPKI-Certificate-Application-Policy`, and `pKICriticalExtensions` are set by the COM layer during create and are embedded in extension blobs — not separately represented in MS-XCEP XML. To update these, use `Remove-ADCSTemplate` followed by `Import-ADCSTemplate` (delete/recreate via COM).
+> **Note:** `pKIExtendedKeyUsage`, `msPKI-Certificate-Application-Policy`, and `pKICriticalExtensions` are set by the COM layer during create and are embedded in extension blobs — not separately represented in MS-XCEP XML. Verification checks these values after create, update and no-op. The updater does not repair them: a difference is a terminating error requiring a separate, deliberate correction.
 
 ### Multi-tenant / multi-forest name override
 
@@ -140,7 +140,7 @@ Import-ADCSTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
 | `-DisplayName` | `string` | No | New display name in AD. Defaults to `-Name` if not specified. |
 | `-Version` | `string` | No | Version as `"major.minor"` (e.g. `"100.1"`). Overrides source version. |
 | `-Server` | `string` | No | Target DC FQDN. Defaults to nearest writable DC. |
-| `-Domain` | `string` | No | Domain DN. Auto-discovered if not specified. |
+| `-Domain` | `string` | No | Compatibility parameter; the forest configuration context is discovered from `-Server`. |
 
 ---
 
@@ -285,18 +285,77 @@ Import-ADCSTemplate -XmlString $xml
 
 Template permissions are deliberately configured separately with PSPKI in the destination.
 The exported private-key security descriptor is not the template DACL.
-These checks establish XML serialization fidelity, not a successful AD/CertEnroll round trip.
-Before deployment, compare the source and imported template on Windows, including provider,
-algorithm, key size, request hash, CNG usage, flags, validity and extensions. The existing
-LDAP update still covers only the attributes listed above; it does not repair every crypto
-setting or extension. No automatic post-create LDAP repair is added by this change.
+### Mandatory verification after import/update
+
+Before returning success, `Import-ADCSTemplate` reads fresh LDAP data from the same DC
+used for the write. This also runs when the update comparison finds nothing to change.
+Expectations come from the input XML, including `-Name`, `-DisplayName` and `-Version`
+overrides. Verification does not depend on PSPKI or CertEnroll's in-memory result.
+
+| Checked settings | Comparison |
+|---|---|
+| Name, display name, revisions, schema, flags, key spec and size, RA signature count | Exact values; signed/unsigned 32-bit flags normalized |
+| Validity and renewal | Exact binary intervals; a one-second difference fails |
+| Provider list | Provider names in their numeric preference order |
+| Algorithm, request hash, CNG key usage, private-key SDDL | Decoded `msPKI-RA-Application-Policies`; Windows OID registry resolves algorithm names |
+| Supersedence, RA policies, EKUs, application policies, issuance policy OIDs, critical extensions | Order-independent lists |
+| Key usage, basic constraints, OCSP no-check | Supported extension data compared with LDAP attributes/flags |
+| Key archival algorithm and length | Checked when specified by the XML |
+
+A mismatch is a **terminating error** listing `Property`, `Expected` and `Actual`.
+The same objects are available in `$_.Exception.Data['Differences']`:
+
+```powershell
+try {
+    Import-ADCSTemplate -XmlString $xml -Server 'dc01.contoso.com'
+} catch {
+    $_.Exception.Data['Differences'] | Format-Table Property, Expected, Actual -Wrap
+    throw
+}
+```
+
+Verification detects differences; it does not expand the LDAP updater's write scope.
+Already committed changes remain in AD on failure. There is no automatic rollback,
+delete/recreate or post-create repair. Multi-template imports can therefore be partly
+completed when a later template fails. Correct the reported differences before retrying.
+
+All policies are preflighted before the first write. Unknown extension OIDs and policy
+qualifiers are rejected because this verifier cannot establish their complete LDAP
+representation. Existing XML files using those features require further verifier support;
+they are not silently accepted. SDDL is compared literally, so equivalent reordered SDDL
+can produce a conservative mismatch. Windows must resolve the stored algorithm names;
+unresolved names also fail verification.
+
+Excluded: template DACL (managed separately), source template identity OIDs and identity
+extension payloads (which change across forests/renames), directory-generated metadata,
+CA publication, forest policy-registration contents and actual certificate enrollment.
+Only settings represented by the supported XML are verified; this is not a byte-for-byte
+copy of every source directory attribute. Enrollment remains a separate lab check.
+
+`-WhatIf` performs no writes or verification of a proposed create/update. A genuine no-op
+can still read and verify the existing template. A display-name difference on an existing
+template is detected but not repaired by the current updater.
 
 Run the offline regression checks (no AD writes or installed PSPKI required):
 
 ```powershell
 powershell.exe -NoProfile -File .\tests\Export-Serialization.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Import-Verification.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Import-ControlFlow.Tests.ps1
 ```
 
 The fixtures check XML escaping, Unicode, both provider property names, exact AD intervals,
 raw flags and extension bytes, plus rejection of missing/inconsistent source data. They do
 not replace Windows PowerShell 5.1 tests with real PSPKI objects and CertEnroll in a lab.
+
+The verification tests cover silent key-size resets, hash/provider drift, one-second
+interval differences, missing values, criticality and application-policy differences,
+malformed crypto metadata, unsigned flags, unsupported extensions and structured errors.
+Control-flow tests replace AD/COM boundaries with test doubles and exercise create,
+update, no-op, multi-policy isolation, pinned DC selection and WhatIf.
+
+The new verification has been tested offline on PowerShell 7.4/Linux only. The existing
+"Tested on" list above describes the prior module, not validation of this change. Before
+merging, test on Windows PowerShell 5.1 with RSA/CSP, RSA/KSP and ECC schema 3/4 templates,
+including actual readback and enrollment. Include a deliberate non-updatable difference
+(e.g. EKU) and confirm that re-import terminates instead of reporting success.
