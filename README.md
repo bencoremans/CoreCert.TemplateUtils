@@ -1,4 +1,4 @@
-# CoreCert.TemplateUtils
+﻿# CoreCert.TemplateUtils
 
 PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required.
 
@@ -345,7 +345,8 @@ unresolved names also fail verification.
 
 Excluded: template DACL (managed separately), source template identity OIDs and identity
 extension payloads (which change across forests/renames), directory-generated metadata,
-CA publication, forest policy-registration contents and actual certificate enrollment.
+CA publication and actual certificate enrollment. Optional companion policy registrations
+are verified separately as described below.
 Only settings represented by the supported XML are verified; this is not a byte-for-byte
 copy of every source directory attribute. Enrollment remains a separate lab check.
 
@@ -398,3 +399,55 @@ OID deletion in an isolated forest. No automatic merge or deployment is performe
 Dependency tests cover loading PSPKI on demand, reusing a loaded module, preserving loader errors, and importing CoreCert.TemplateUtils without loading PSPKI.
 
 Run `powershell.exe -NoProfile -File .\tests\Policy-RoundTrip.Tests.ps1` with PSPKI installed to exercise the real extension classes without AD writes. The test also accepts `-LibraryPath` pointing to the PSPKI DLL directory for isolated offline testing.
+
+
+### Migrating custom policy registrations
+
+Template XML contains numeric policy OIDs, but does not carry complete AD registration
+metadata. Export the referenced AD registrations alongside the XML:
+
+```powershell
+# Source forest, using the XML already produced by Export-ADCSTemplate:
+$registrations = @(Export-ADCSTemplatePolicyRegistration -XmlString $xml -Server 'dc.source.example')
+ConvertTo-Json -InputObject $registrations -Depth 4 | Set-Content '.\templates.policies.json' -Encoding UTF8
+
+# Destination forest, in a fresh PowerShell session with a stable execution identity:
+$registrations = @(Get-Content '.\templates.policies.json' -Raw | ConvertFrom-Json)
+Import-ADCSTemplate -XmlString $xml -Server 'dc.target.example' `
+    -PolicyRegistrations $registrations -PolicyRegistrationTimeoutSeconds 120 -WhatIf
+# Remove -WhatIf after reviewing the planned actions.
+```
+
+The companion export reads registrations directly from the chosen source DC for EKUs,
+application policies, issuance policies and RA policy requirements referenced by the XML.
+It preserves numeric OIDs and display names; it does not generate replacement policy OIDs.
+OIDs without AD registrations are omitted, including built-in policies with no AD object.
+
+Before registration, all supplied metadata and existing target registrations are checked.
+Unreferenced OIDs, duplicate OIDs, ambiguous registrations, type/name conflicts and unknown
+metadata fields stop the operation. Existing matching registrations are reused unchanged.
+CPS URLs, user notices, localized names and policy-to-group links are currently rejected,
+not silently discarded or recreated. These need a separate migration procedure.
+
+For missing registrations, the implicit `LDAP://RootDSE` configurationNamingContext must
+match the configurationNamingContext read from `-Server`. PSPKI then performs the write
+using `Register-ObjectIdentifier -UseActiveDirectory`. Keep the execution identity unchanged
+throughout the session, including before the first pkix.net call: pkix.net caches its OID
+container path. This check does not support changing identity in an existing session.
+
+The importer polls the selected target DC every 500 ms until the OID, policy type and
+name match. The configurable timeout is per registration (default 120 seconds), not an
+assumption about replication speed. A registration error or timeout prevents subsequent
+template writes. Successful registrations are not rolled back if a later operation fails;
+retry after resolving replication or other errors. PSPKI's multi-attribute registration
+itself is not transactional. Template ACLs and OID registration ACLs are not migrated.
+
+`-WhatIf` validates and displays planned actions without registering OIDs or importing
+templates. Omitting `-PolicyRegistrations` retains the existing template-only behavior;
+it does not discover missing custom registration names from XML. PSPKI loads on demand
+for registration as well as export/policy verification.
+
+Run `powershell.exe -NoProfile -File .\tests\Policy-Registration.Tests.ps1` for offline
+context, conflict, metadata and replication-polling checks. Import control-flow tests also
+cover registration-before-commit, timeout aborts and WhatIf. Windows AD lab testing is still
+required for real PSPKI registration, replication, permissions and CertEnroll behavior.

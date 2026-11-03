@@ -8,6 +8,7 @@ $stub=New-Module -Name PSPKI -ScriptBlock {}; Import-Module $stub
 try {
     $source=Get-Content (Join-Path $PSScriptRoot '../Import-ADCSTemplate.ps1') -Raw
     $source=$source.Replace(". (Join-Path `$PSScriptRoot 'TemplateVerification.ps1')",'').Replace(". (Join-Path `$PSScriptRoot 'TemplateDirectory.ps1')",'')
+    $source=$source.Replace(". (Join-Path `$PSScriptRoot 'TemplatePolicyRegistration.ps1')",'')
     $start=$source.IndexOf('        if ('); $end=$source.IndexOf('        #region Helper:', $start)
     $source=$source.Remove($start,$end-$start).Replace('[ADSI]','[object]')
     $source=$source.Replace('$searcher.SearchRoot.Dispose();', '')
@@ -118,5 +119,24 @@ try {
     Assert-Equal $script:writes 0 'Invalid second policy stops first write'
     Assert-Throws { Import-ADCSTemplate $xml -Server dc.child.test -Version '999999999999.0' } '*Invalid -Version range*'
     Assert-Equal $script:writes 0 'Invalid version stops all writes'
-    'PASS: import control flow tests' 
+    # Registration must complete before any COM commit, and WhatIf must not register.
+    $script:registrationCalls=0; $script:registrationFailure=$false
+    function Get-TemplatePolicyRegistrationPlan { param($Document,$Registrations,$Context); $Registrations }
+    function Register-TemplatePolicyRegistration {
+        param($Registration,$Context,$TimeoutSeconds)
+        Assert-Equal $script:writes 0 'Registration before template writes'
+        $script:registrationCalls++
+        if ($script:registrationFailure) { throw 'Policy replication timeout (test double)' }
+    }
+    $metadata=[pscustomobject]@{Oid='1.2.3.4';OidGroup='ApplicationPolicy';FriendlyName='Custom'}
+    Import-ADCSTemplate $xml -Server dc.child.test -PolicyRegistrations @($metadata) -WhatIf | Out-Null
+    Assert-Equal $script:registrationCalls 0 'WhatIf does not register policies'
+    Assert-Equal $script:writes 0 'WhatIf with metadata does not commit templates'
+    $script:registrationFailure=$true
+    Assert-Throws { Import-ADCSTemplate $xml -Server dc.child.test -PolicyRegistrations @($metadata) } '*Policy replication timeout*'
+    Assert-Equal $script:writes 0 'Failed registration prevents all template commits'
+    $script:registrationFailure=$false
+    Import-ADCSTemplate $xml -Server dc.child.test -PolicyRegistrations @($metadata) | Out-Null
+    Assert-Equal $script:writes 2 'Templates committed after registration succeeds'
+    'PASS: import control flow tests'  
 } finally { Remove-Module $stub; Remove-Item Function:New-Object -ErrorAction SilentlyContinue }

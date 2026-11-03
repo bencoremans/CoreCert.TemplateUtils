@@ -35,5 +35,5 @@ try {
 $before=@(Get-Module PSPKI).Count
 Import-Module (Join-Path $PSScriptRoot '../CoreCert.TemplateUtils.psd1') -Force
 Assert-Equal @(Get-Module PSPKI).Count $before 'Module import does not load PSPKI'
-Assert-Equal @(Get-Command -Module CoreCert.TemplateUtils).Count 4 'Public commands available'
+Assert-Equal @(Get-Command -Module CoreCert.TemplateUtils).Count 5 'Public commands available'
 'PASS: export dependency loading tests'

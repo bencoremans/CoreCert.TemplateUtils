@@ -12,7 +12,7 @@ function Get-TemplateDirectoryContext {
     try { $configuration = [string]$root.Properties['configurationNamingContext'].Value } finally { $root.Dispose() }
     if (-not $configuration) { throw "Cannot read configurationNamingContext from '$Server'." }
     $base = "CN=Public Key Services,CN=Services,$configuration"
-    [pscustomobject]@{ Server=$Server; TemplateBase="CN=Certificate Templates,$base"; OidBase="CN=OID,$base" }
+    [pscustomobject]@{ Server=$Server; ConfigurationNamingContext=$configuration; TemplateBase="CN=Certificate Templates,$base"; OidBase="CN=OID,$base" }
 }
 function Find-TemplateDirectoryObject {
     param([string]$Server, [string]$Base, [string]$Filter)

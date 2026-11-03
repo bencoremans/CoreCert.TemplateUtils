@@ -33,6 +33,15 @@
 .PARAMETER Server
     Optional. Target DC FQDN. Defaults to nearest writable DC.
 
+.PARAMETER PolicyRegistrations
+    Optional companion objects from Export-ADCSTemplatePolicyRegistration / ConvertFrom-Json.
+    Missing policy registrations are created via PSPKI before importing templates.
+    Existing registrations must match. The executing context must remain unchanged throughout
+    the PowerShell session, including before the first pkix.net use.
+
+.PARAMETER PolicyRegistrationTimeoutSeconds
+    Maximum wait per newly registered OID for visibility on Server. Default: 120 seconds.
+
 .PARAMETER Domain
     Retained for compatibility. The configuration naming context is read from Server.
 
@@ -55,6 +64,7 @@
 #>
 . (Join-Path $PSScriptRoot 'TemplateVerification.ps1')
 . (Join-Path $PSScriptRoot 'TemplateDirectory.ps1')
+. (Join-Path $PSScriptRoot 'TemplatePolicyRegistration.ps1')
 
 function Import-ADCSTemplate {
     [CmdletBinding(SupportsShouldProcess)]
@@ -67,7 +77,10 @@ function Import-ADCSTemplate {
         [string]$DisplayName = "",
         [string]$Version     = "",
         [string]$Server      = "",
-        [string]$Domain      = ""
+        [string]$Domain      = "",
+        [object[]]$PolicyRegistrations = @(),
+        [ValidateRange(1,3600)]
+        [int]$PolicyRegistrationTimeoutSeconds = 120
     )
 
     begin {
@@ -136,6 +149,17 @@ function Import-ADCSTemplate {
             $names[$sourceName] = $true
             Assert-TemplatePolicyInput $doc $sourcePolicy
             $null = Get-TemplateXmlExpectation $doc $sourcePolicy ''
+        }
+
+        if ($PolicyRegistrations.Count) {
+            $missingRegistrations = @(Get-TemplatePolicyRegistrationPlan $doc $PolicyRegistrations $context)
+            foreach ($registration in $missingRegistrations) {
+                if ($PSCmdlet.ShouldProcess("$($registration.OidGroup) '$($registration.Oid)' in $($context.ConfigurationNamingContext)", 'Register policy OID via PSPKI')) {
+                    Register-TemplatePolicyRegistration $registration $context $PolicyRegistrationTimeoutSeconds
+                } elseif (-not $WhatIfPreference) {
+                    throw 'Policy registration was declined; template import stopped.'
+                }
+            }
         }
 
         # -----------------------------------------------------------------------

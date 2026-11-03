@@ -6,6 +6,7 @@
     Description       = 'PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required for import/update operations.'
     FunctionsToExport = @(
         'Export-ADCSTemplate',
+        'Export-ADCSTemplatePolicyRegistration',
         'Get-ADCSTemplate',
         'Import-ADCSTemplate',
         'Remove-ADCSTemplate'
@@ -19,6 +20,7 @@
         'Import-ADCSTemplate.ps1',
         'TemplateVerification.ps1',
         'TemplatePolicyLibrary.ps1',
+        'TemplatePolicyRegistration.ps1',
         'TemplateDirectory.ps1',
         'Remove-ADCSTemplate.ps1',
         'README.md'
