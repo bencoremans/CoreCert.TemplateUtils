@@ -18,7 +18,7 @@ This module builds on that foundation with:
 
 - PowerShell 5.1 or newer
 - Windows Server 2008 R2 / Windows 7 or newer (CertEnroll COM for import)
-- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI -AllowClobber`) — required **only** for `Export-ADCSTemplate`
+- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI -AllowClobber`) — required **only** for `Export-ADCSTemplate`; loaded automatically when needed
 - Enterprise Administrator permissions (templates are stored in the AD Configuration partition)
 
 ---
@@ -107,7 +107,11 @@ $xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding UTF8
 |-----------|------|----------|-------------|
 | `-Template` | `hashtable[]` | Yes | One or more hashtables with `templatePSPKI` (from PSPKI) and `templateADO` (from `Get-ADCSTemplate`) keys |
 
-**Requires:** PSPKI module (`Install-Module PSPKI -AllowClobber`)
+**Requires:** an installed PSPKI module (`Install-Module PSPKI`). The export function loads
+PSPKI on demand if it is not already loaded. It does not install PSPKI or force a reload.
+Module import and the Get/Import/Remove functions do not load PSPKI. Loading failures retain
+the underlying error message. The input still requires the existing PSPKI and AD objects;
+this change does not add template lookup by name to the export function.
 
 ---
 
@@ -353,6 +357,7 @@ Run the offline regression checks (no AD writes or installed PSPKI required):
 
 ```powershell
 powershell.exe -NoProfile -File .\tests\Export-Serialization.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Export-Dependency.Tests.ps1
 powershell.exe -NoProfile -File .\tests\Import-Verification.Tests.ps1
 powershell.exe -NoProfile -File .\tests\Import-ControlFlow.Tests.ps1
 powershell.exe -NoProfile -File .\tests\Review-Fixes.Tests.ps1
@@ -383,9 +388,11 @@ including actual readback and enrollment. Include a deliberate non-updatable dif
 | [#5](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/5) | Preflight every policy, required values, namespaces, OID groups, ranges, unsigned flags and one COM policy per create | Invalid second policy causes zero writes; invalid version, namespace/DTD, group and high-bit flags |
 | [#6](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/6) | Display name, non-decreasing revisions, idempotence and unsupported-difference detection before updates | Content/display changes, repeat import, downgrade/overflow and no partial unsupported update |
 | [#7](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/7) | Export fidelity, local OID table keyed by value+group, independent LDAP readback and explicit verification limits | Serialization, OID-group collision, crypto/extension drift and missing values |
-| [#8](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/8) | Packaging, documentation and four offline suites | Manifest import/export checks and PowerShell parsing |
+| [#8](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/8) | Packaging, documentation and five offline suites | Manifest import/export checks and PowerShell parsing |
 
 All six issues are implemented in PR #2 and remain open until merge. This is a draft,
 not a release tested in AD. Lab validation must cover Windows PowerShell 5.1, RSA/CSP,
 RSA/KSP, ECC and schema 3/4 on the intended Windows versions, actual enrollment and
 OID deletion in an isolated forest. No automatic merge or deployment is performed.
+
+Dependency tests cover loading PSPKI on demand, reusing a loaded module, preserving loader errors, and importing CoreCert.TemplateUtils without loading PSPKI.

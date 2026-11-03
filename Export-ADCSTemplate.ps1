@@ -46,7 +46,13 @@ function Export-ADCSTemplate {
     )
 
     if (-not (Get-Module -Name PSPKI -ErrorAction SilentlyContinue)) {
-        throw "The PSPKI module is required for Export-ADCSTemplate. Run: Install-Module PSPKI -AllowClobber"
+        try {
+            Import-Module -Name PSPKI -ErrorAction Stop
+        } catch {
+            throw [InvalidOperationException]::new(
+                "Export-ADCSTemplate requires PSPKI and could not load it. Install it with 'Install-Module PSPKI', then retry. Loader error: $($_.Exception.Message)",
+                $_.Exception)
+        }
     }
 
     # Normalize to array for consistent iteration
