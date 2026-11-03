@@ -296,6 +296,7 @@ function Export-ADCSTemplate {
             [void]$applicationPolicies.Add([Security.Cryptography.Oid]::new([string]$value))
         }
         if ($applicationPolicies.Count) {
+            Import-TemplatePolicyLibrary 'Application policy export' 'SysadminsLV.PKI.Cryptography.X509Certificates.X509ApplicationPoliciesExtension' 
             $critical = $applicationPolicyOid -in $temp.templateADO.pKICriticalExtensions
             $extensions += [SysadminsLV.PKI.Cryptography.X509Certificates.X509ApplicationPoliciesExtension]::new($applicationPolicies, $critical)
         }

@@ -22,9 +22,11 @@ function Read-TemplateDerElement {
     if ($length -ge 128) {
         $count = $length -band 127
         if ($count -eq 0 -or $count -gt 4 -or $position + $count -gt $Bytes.Length) { throw 'Invalid DER length.' }
+        if ($Bytes[$position] -eq 0) { throw 'Noncanonical DER length.' }
         $length = 0
         for ($i = 0; $i -lt $count; $i++) { $length = ($length * 256) + $Bytes[$position++ ] }
     }
+    if ($Bytes[$start + 1] -ge 128 -and $length -lt 128) { throw 'Noncanonical DER length.' }
     if ($position + $length -gt $Bytes.Length) { throw 'Truncated extension DER value.' }
     $end = [int]($position + $length)
     [byte[]]$value = @(); if ($length) { $value = $Bytes[$position..($end - 1)] }
@@ -35,7 +37,7 @@ function Read-TemplateDerElement {
 function Read-TemplatePolicyOids {
     param([byte[]]$Bytes, [string]$ExtensionOid = '2.5.29.32')
     $offset = 0; $outer = Read-TemplateDerElement $Bytes ([ref]$offset)
-    if ($outer.Tag -ne 48 -or $offset -ne $Bytes.Length) { throw 'Invalid policy extension DER.' }
+    if ($outer.Tag -ne 48 -or $offset -ne $Bytes.Length -or $outer.Value.Length -eq 0) { throw 'Invalid policy extension DER.' }
     $offset = 0
     while ($offset -lt $outer.Value.Length) {
         $policy = Read-TemplateDerElement $outer.Value ([ref]$offset)
@@ -46,7 +48,12 @@ function Read-TemplatePolicyOids {
         if ($inner -ne $policy.Value.Length) { throw 'Policy qualifiers cannot be verified from template LDAP attributes. Import stopped before writing.' }
     }
     # Keep the structural/qualifier check above. pkix.net handles decoding the OIDs.
-    Import-TemplatePolicyLibrary 'Template policy verification'
+    $typeName = switch ($ExtensionOid) {
+        '1.3.6.1.4.1.311.21.10' { 'SysadminsLV.PKI.Cryptography.X509Certificates.X509ApplicationPoliciesExtension' }
+        '2.5.29.32' { 'SysadminsLV.PKI.Cryptography.X509Certificates.X509CertificatePoliciesExtension' }
+        default { throw "Unsupported policy extension '$ExtensionOid'." }
+    }
+    Import-TemplatePolicyLibrary 'Template policy verification' $typeName
     $encoded = [Security.Cryptography.AsnEncodedData]::new($Bytes)
     if ($ExtensionOid -eq '1.3.6.1.4.1.311.21.10') {
         $extension = [SysadminsLV.PKI.Cryptography.X509Certificates.X509ApplicationPoliciesExtension]::new($encoded, $false)

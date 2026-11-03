@@ -23,6 +23,7 @@ try {
     Assert-Equal $result.Count 1 'Export returns only XML'
     Export-ADCSTemplate $fixture | Out-Null
     Assert-Equal $script:loadCount 1 'Already loaded dependency reused'
+    Assert-Throws { Import-TemplatePolicyLibrary 'Policy verification' 'Missing.Pkix.Type' } '*loaded PSPKI libraries do not provide*'
     $script:loaded=$false; $script:loaderFailure=$true
     $output=[Collections.Generic.List[object]]::new()
     Assert-Throws { Export-ADCSTemplate $fixture | ForEach-Object { $output.Add($_) } } '*could not load*simulated DLL version conflict*'

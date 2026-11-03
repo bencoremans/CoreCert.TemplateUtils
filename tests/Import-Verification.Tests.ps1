@@ -57,6 +57,8 @@ try {
     [xml]$doc = Export-ADCSTemplate (New-Fixture)
     $doc.GetPoliciesResponse.oIDs.oID[-1].value='1.2.3.999'
     Assert-Throws { Get-TemplateXmlExpectation $doc $doc.GetPoliciesResponse.response.policies.policy '' } '*cannot be verified*'
+    Assert-Throws { Read-TemplatePolicyOids ([byte[]]@(48,0)) } '*Invalid policy extension*'
+    Assert-Throws { Read-TemplatePolicyOids ([byte[]]@(48,129,7,48,5,6,3,42,3,4)) } '*Noncanonical*'
     # Verify the error carries a machine-readable diff and the reader uses the pinned DC.
     function Read-TemplateVerificationState {
         param($Server,$TemplateBase,$Name)
