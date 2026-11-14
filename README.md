@@ -510,3 +510,12 @@ example and review the WhatIf operation, target name and DC. The guide lists act
 EKUs, key sizes, periods, providers and flags, including the CC-CepEncryption naming
 discrepancy. Only WebServer has live import/export coverage here. Template ACLs, CA
 publication and enrollment remain separate steps; do not publish the whole set blindly.
+
+## Run the expanded test suite
+
+See [tests/README.md](tests/README.md) for the isolated offline runner, ten-example
+contracts, RSA/ECC/provider cases, custom ApplicationPolicy fixtures and explicit opt-in
+lifecycle, replication and enrollment scripts. Missing real pkix libraries are reported
+as Skip; integration scripts are never started by the offline runner. Added test code
+is not a claim that its live cases have run.
+

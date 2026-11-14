@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference='Stop'
+$ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Export-Serialization.Tests.ps1')
 . (Join-Path $PSScriptRoot '../TemplateVerification.ps1')
 . (Join-Path $PSScriptRoot '../Remove-ADCSTemplate.ps1')
@@ -39,7 +39,7 @@ try {
     $script:registration=[pscustomobject]@{Path='LDAP://dc/oid'; Values=@{'msPKI-Cert-Template-OID'='1.2.3.4';flags=1;displayName='Different display name'}}
     $script:registrations=@($script:registration); $script:references=@($script:template)
     $script:deleted=[Collections.Generic.List[string]]::new(); $script:filters=[Collections.Generic.List[string]]::new()
-    $script:missing=$false; $script:deleteFailure=$false
+    $script:missing=$false; $script:deleteFailure=$false; $script:templateDeleteFailure=$false
     function Get-TemplateDirectoryContext { [pscustomobject]@{Server='dc';TemplateBase='templates';OidBase='oids'} }
     function Find-TemplateDirectoryObject {
         param($Server,$Base,$Filter)
@@ -50,12 +50,17 @@ try {
     }
     function Remove-TemplateDirectoryObject {
         param($Path)
+        if ($script:templateDeleteFailure -and $Path -eq 'LDAP://dc/template') { throw 'template delete denied' }
         if ($script:deleteFailure -and $Path -eq 'LDAP://dc/oid') { throw 'denied' }
         $script:deleted.Add($Path)
     }
     Remove-ADCSTemplate 'A*(B)' -WhatIf | Out-Null
     Assert-Equal $script:deleted.Count 0 'WhatIf deletes nothing'
     Assert-Equal $script:filters[0] '(&(objectClass=pKICertificateTemplate)(cn=A\2a\28B\29))' 'Literal remove filter'
+    $script:templateDeleteFailure=$true
+    Assert-Throws { Remove-ADCSTemplate 'A*(B)' -Confirm:$false } '*template delete denied*'
+    Assert-Equal $script:deleted.Count 0 'First delete failure never deletes the OID'
+    $script:templateDeleteFailure=$false
     Remove-ADCSTemplate 'A*(B)' -Confirm:$false | Out-Null
     Assert-Equal ($script:deleted -join ',') 'LDAP://dc/template,LDAP://dc/oid' 'Exact OID despite different display name'
     $script:deleted.Clear(); $script:registration.Values.flags=2
