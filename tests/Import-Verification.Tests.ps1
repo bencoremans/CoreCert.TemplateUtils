@@ -1,4 +1,4 @@
-﻿# Offline behavioral tests; run with PowerShell 5.1+ (no AD or CertEnroll needed).
+# Offline behavioral tests; run with PowerShell 5.1+ (no AD or CertEnroll needed).
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Export-Serialization.Tests.ps1')
 . (Join-Path $PSScriptRoot '../TemplateVerification.ps1')
@@ -19,7 +19,7 @@ function New-ActualFixture {
     }
 }
 try {
-    [xml]$doc = Export-ADCSTemplate (New-Fixture)
+    [xml]$doc = ConvertTo-TemplateXml (New-Fixture)
     $policy = $doc.GetPoliciesResponse.response.policies.policy
     $expected = Get-TemplateXmlExpectation $doc $policy 'Test & <TLS> café'
     $actual = New-ActualFixture
@@ -54,7 +54,7 @@ try {
     Assert-Throws { Read-TemplatePolicyOids ([byte[]]@(48,10,48,5,6,3,42,3,4)) } '*Truncated*'
     $attrs=$policy.attributes; $attrs.RemoveChild($attrs.SelectSingleNode('*[local-name()="privateKeyFlags"]')) | Out-Null
     Assert-Throws { Get-TemplateXmlExpectation $doc $policy '' } '*Missing required*'
-    [xml]$doc = Export-ADCSTemplate (New-Fixture)
+    [xml]$doc = ConvertTo-TemplateXml (New-Fixture)
     $doc.GetPoliciesResponse.oIDs.oID[-1].value='1.2.3.999'
     Assert-Throws { Get-TemplateXmlExpectation $doc $doc.GetPoliciesResponse.response.policies.policy '' } '*cannot be verified*'
     Assert-Throws { Read-TemplatePolicyOids ([byte[]]@(48,0)) } '*Invalid policy extension*'

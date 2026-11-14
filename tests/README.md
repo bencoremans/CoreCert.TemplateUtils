@@ -31,13 +31,13 @@ There are two dependency levels:
 | Updates/revisions/no-op | Import-ControlFlow, Review-Fixes | Supported update, repeat no-op, unsupported difference refusal, revisions and preflight; mocked directory |
 | Removal | Review-Fixes | Ownership/shared-OID/ambiguity, first-delete refusal, partial second-delete failure, missing objects and WhatIf |
 | Policy registration | Policy-Registration, Import-ControlFlow | Conflicts, missing/incomplete registrations, reuse and registration-before-template ordering; mocked directory/registration |
-| Custom ApplicationPolicy distinct from EKU | Examples, Custom-ApplicationPolicy, Policy-RoundTrip | Structural/companion coverage always; real extension decoding only with pkix dependency |
+| Custom ApplicationPolicy distinct from EKU | Examples, Custom-ApplicationPolicy, Policy-RoundTrip | Structural/bundle coverage always; real extension decoding only with pkix dependency |
 | Nil XML and concurrent-change baseline | Strict-OptionalXml, Reconciliation-Usn | Missing/empty containers, numeric COM/Int64 version checks and refusal; not an atomic concurrency guarantee |
 
-`fixtures/CustomApplicationPolicy.xcep.xml` is a separate synthetic test profile.
+`fixtures/CustomApplicationPolicy.json` is a separate synthetic test profile.
 It has Server Authentication EKU, **different** custom ApplicationPolicy OID `1.2.3.4`,
-and complete companion metadata in `CustomApplicationPolicy.registrations.json`.
-The OID is an offline placeholder, not a claim of enterprise ownership. Before live registration, supply your own authorized test OID and matching XML/sidecar; the lifecycle script refuses registration of this placeholder.
+and complete registration metadata in its PolicyRegistrations array.
+The OID is an offline placeholder, not a claim of enterprise ownership. Before live registration, supply your own authorized test OID and matching bundle; the lifecycle script refuses registration of this placeholder.
 The original examples are not modified to supply missing test data.
 
 ## Explicit live acceptance cases (not run by the offline runner)
@@ -52,8 +52,8 @@ lab runs; merely adding or parsing these tests does not prove live acceptance.
 `Create`, `Update`, `Export`, `Remove` or `PolicyExport`. It requires `-RunLive`, a pinned
 `-Server`, a `TU-Test-*` name and new `-ReportPath`. Create refuses an existing name.
 Other object phases require its exact `-ExpectedObjectGuid` and `-ExpectedTemplateOid`.
-Choose one XML profile using `-XmlPath`; optionally supply complete custom registration
-metadata with `-PolicyRegistrationsPath`. PolicyExport requires the expected sidecar and compares exported OID/group/name values.
+Choose one JSON bundle using `-BundlePath`; it contains complete custom registration
+metadata. PolicyExport compares exported OID/group/name values with the input bundle.
 
 Create uses the actual public importer and compares actual AD/PSPKI export with source
 settings. Update exercises a changed display name, one minor revision increment, then
@@ -90,11 +90,12 @@ private key and CA request behind after failure; no deletion or resubmission is 
 Other providers/key algorithms and application TLS acceptance need
 separate cases before broader deployment claims.
 
-## Evidence status
+## Evidence status before the 3.0 JSON API change
 
 The initial expanded offline run had eleven passing suites and two dependency skips on
 its host. Both dependency suites subsequently passed on Windows PowerShell5.1 with
-real PSPKI4.4/pkix.net. A JSON sidecar regression now covers one- and multiple-entry
+real PSPKI4.4/pkix.net. The final complete isolated run passed all sixteen suites with
+zero skips or failures using those libraries. A JSON bundle regression covers one- and multiple-entry
 arrays on PowerShell5.1; consumers must assign ConvertFrom-Json output directly.
 
 The opt-in WebServer lifecycle Create/export and Update/no-op phases passed live:
@@ -108,6 +109,29 @@ public Remove passed live: both the new template and its exact owned template OI
 removed, the other OID registrations were unchanged, and the CA list remained empty.
 The historical failed attempts remain failures; the fresh pass proves the corrected path.
 Application/issuance-policy registration removal is not part of this proof.
-Other example profiles, custom-policy registration in AD, replication and enrollment
-have not yet passed these live cases. Serialization tests do not prove provider or
-certificate-enrollment behavior. No broad deployment readiness is claimed.
+All ten supplied source profiles have now passed live import, real PSPKI/AD export
+comparison and public removal of their own template/OID. Two additional templates
+shared the same newly registered ApplicationPolicy and IssuancePolicy: registration
+export matched the sidecar; removing one retained the other and both registrations;
+removing the second still retained both policy registrations. Their identities and
+metadata remained unchanged. No policy-registration deletion was performed.
+
+Replication and certificate enrollment remain untested by these cases. Serialization
+and template import do not prove cryptographic provider behavior or deployment readiness.
+
+## Read-only policy usage report
+
+`integration/Policy-Usage.Integration.ps1 -RunLive -Server <dc> -Oid <oid> -ReportPath <new.json>`
+reads all templates and policy registrations from one DC. It checks exact OID tokens in
+EKU, application policy, issuance policy and both RA policy attributes, including the
+schema-dependent legacy/packed RA form; template-identity collisions are also reported.
+Unrecognized/unreadable metadata produces `Unknown`, never an unused-policy assertion.
+Group links and registration ambiguity are reported. The helper never authorizes deletion:
+no template references does not establish absence of external certificate/application use.
+
+`Policy-Usage.Tests.ps1` covers all five reference attributes, shared references, exact
+matching, malformed/schema-inconsistent metadata and group links. The optional report
+script defaults to Skip; it is not a policy cleanup API.
+## Version 3.0 bundle tests
+
+Bundle-Format tests array shapes; Bundle-Contract tests the public API, automatic source registration export, absent-registration preservation, invalid envelopes and WhatIf/Confirm. Import-ControlFlow now invokes the actual importer through the public JSON wrapper. The older live results above remain baselines. The revised 3.0 runner passed all seventeen suites with actual PSPKI4.4 and no skipped dependencies. A live bundle with two templates and four custom registrations (two application, two issuance) passed public import, automatic registration creation, real export and identical no-op reimport. OID/type/name, object identity and revisions were retained. The first separately removed test template and its own OID passed guest postchecks, but a private caller output-array error paused cleanup before removing the second template. That unpublished template and four registrations remain; no complete 3.0 cleanup claim is made. No XML/sidecar public compatibility is retained.

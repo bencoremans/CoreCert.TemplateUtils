@@ -1,46 +1,8 @@
 . (Join-Path $PSScriptRoot 'TemplatePolicyLibrary.ps1')
 
 
-<#
-.SYNOPSIS
-    Exports one or more certificate templates to an MS-XCEP XML string.
-
-.DESCRIPTION
-    Serializes certificate template objects to the MS-XCEP GetPoliciesResponse XML format
-    used by CX509EnrollmentPolicyWebService / Import-ADCSTemplate.
-
-    Each template requires both the PSPKI template object (Get-CertificateTemplate) and the
-    AD object (Get-ADCSTemplate) as input. The AD object supplies attributes not available
-    through PSPKI alone (msPKI-Private-Key-Flag and exact validity/renewal intervals).
-
-.PARAMETER Template
-    One or more hashtables with keys:
-        templatePSPKI  - Output of Get-CertificateTemplate
-        templateADO    - Output of Get-ADCSTemplate
-
-.EXAMPLE
-    $t = @{
-        templatePSPKI = Get-CertificateTemplate -Name "CC-WebServer"
-        templateADO   = Get-ADCSTemplate        -Name "CC-WebServer"
-    }
-    $xml = Export-ADCSTemplate -Template $t
-
-.EXAMPLE
-    # Export multiple templates
-    $templates = "CC-WebServer","CC-User" | ForEach-Object {
-        @{
-            templatePSPKI = Get-CertificateTemplate -Name $_
-            templateADO   = Get-ADCSTemplate        -Name $_
-        }
-    }
-    $xml = Export-ADCSTemplate -Template $templates
-    $xml | Set-Content ".\templates\CC-Templates.xml" -Encoding UTF8
-
-.NOTES
-    Requires the PSPKI module (Install-Module PSPKI).
-    Requires Enterprise Administrator permissions.
-#>
-function Export-ADCSTemplate {
+# Internal MS-XCEP serializer. Public export wraps this XML and source registration metadata in JSON.
+function ConvertTo-TemplateXml {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]

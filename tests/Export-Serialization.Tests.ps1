@@ -1,4 +1,4 @@
-﻿# Offline regression tests. No AD, CertEnroll or installed PSPKI required.
+# Offline regression tests. No AD, CertEnroll or installed PSPKI required.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../Export-ADCSTemplate.ps1')
 $stub = New-Module -Name PSPKI -ScriptBlock {}
@@ -49,7 +49,7 @@ function New-Fixture {
 }
 try {
     $f = New-Fixture
-    $output = @(Export-ADCSTemplate $f)
+    $output = @(ConvertTo-TemplateXml $f)
     Assert-Equal $output.Count 1 'Export must return one string'
     [xml]$doc = $output[0]
     $a = $doc.GetPoliciesResponse.response.policies.policy.attributes
@@ -65,35 +65,35 @@ try {
     $encoded = [Text.UTF8Encoding]::new($false, $true).GetBytes($doc.OuterXml)
     [xml]$decoded = [Text.Encoding]::UTF8.GetString($encoded)
     Assert-Equal $decoded.GetPoliciesResponse.oIDs.oID[0].defaultName 'Test & <TLS> café' 'UTF-8 round trip'
-    [xml]$multi = Export-ADCSTemplate @($f, (New-Fixture))
+    [xml]$multi = ConvertTo-TemplateXml @($f, (New-Fixture))
     Assert-Equal @($multi.GetPoliciesResponse.response.policies.policy).Count 2 'Multiple policies'
     $f.templatePSPKI.Settings.Cryptography | Add-Member ProviderList @('Preferred provider')
-    [xml]$doc = Export-ADCSTemplate $f
+    [xml]$doc = ConvertTo-TemplateXml $f
     Assert-Equal $doc.GetPoliciesResponse.response.policies.policy.attributes.privateKeyAttributes.cryptoProviders.provider 'Preferred provider' 'ProviderList preference'
     $f = New-Fixture
     $f.templatePSPKI.Settings.Cryptography.CSPList = @()
-    [xml]$doc = Export-ADCSTemplate $f
+    [xml]$doc = ConvertTo-TemplateXml $f
     Assert-Equal $doc.GetPoliciesResponse.response.policies.policy.attributes.privateKeyAttributes.cryptoProviders.GetAttribute('nil', 'http://www.w3.org/2001/XMLSchema-instance') 'true' 'Explicit empty providers'
     $f.templatePSPKI.Settings.Cryptography.PSObject.Properties.Remove('CSPList')
-    Assert-Throws { Export-ADCSTemplate $f } '*neither ProviderList nor CSPList*'
+    Assert-Throws { ConvertTo-TemplateXml $f } '*neither ProviderList nor CSPList*'
     $f = New-Fixture
     $f.templateADO.pKIExpirationPeriod = [BitConverter]::GetBytes([long]-10000001)
-    Assert-Throws { Export-ADCSTemplate $f } '*refusing to round*'
+    Assert-Throws { ConvertTo-TemplateXml $f } '*refusing to round*'
     $f = New-Fixture
     $f.templateADO.PSObject.Properties.Remove('pKIOverlapPeriod')
-    Assert-Throws { Export-ADCSTemplate $f } '*Missing AD attribute*'
+    Assert-Throws { ConvertTo-TemplateXml $f } '*Missing AD attribute*'
     $f = New-Fixture
     $f.templateADO.Name = 'WrongTemplate'
-    Assert-Throws { Export-ADCSTemplate $f } '*names differ*'
+    Assert-Throws { ConvertTo-TemplateXml $f } '*names differ*'
     $f = New-Fixture
     $f.templateADO.PSObject.Properties.Remove('msPKI-Private-Key-Flag')
-    Assert-Throws { Export-ADCSTemplate $f } '*Missing AD msPKI-Private-Key-Flag*'
+    Assert-Throws { ConvertTo-TemplateXml $f } '*Missing AD msPKI-Private-Key-Flag*'
     $f = New-Fixture
     $f.templatePSPKI.Settings.Cryptography.PSObject.Properties.Remove('HashAlgorithm')
-    Assert-Throws { Export-ADCSTemplate $f } '*Missing PSPKI cryptography property*'
+    Assert-Throws { ConvertTo-TemplateXml $f } '*Missing PSPKI cryptography property*'
     $f = New-Fixture
     $f.templatePSPKI.DisplayName = "Invalid$([char]1)name"
-    Assert-Throws { Export-ADCSTemplate $f } '*'
+    Assert-Throws { ConvertTo-TemplateXml $f } '*'
     'PASS: export serialization regression tests'
 } finally {
     Remove-Module $stub

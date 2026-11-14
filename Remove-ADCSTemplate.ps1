@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Removes a template and its uniquely identified template OID registration.
 .DESCRIPTION

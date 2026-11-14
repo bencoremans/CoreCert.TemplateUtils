@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot '../TemplateVerification.ps1')
 function Assert-True($Value,$Message){if(-not $Value){throw $Message}}
 $directory=Join-Path $PSScriptRoot '../examples/templates'
-$combined=Read-TemplatePolicyDocument ([IO.File]::ReadAllText((Join-Path $directory 'CC-Templates.xcep.xml')))
+$combined=Read-TemplatePolicyDocument ((Get-Content (Join-Path $directory 'CC-Templates.json') -Raw|ConvertFrom-Json).TemplateXml)
 $contracts=@{
  'CC-CepEncryption'=@('1.3.6.1.4.1.311.20.2.1',365,42,84214016,1207959552,32,131649,'nil')
  'CC-ClientAuth'=@('1.3.6.1.5.5.7.3.2',365,42,101056512,9,0,131680,'SHA256')
@@ -19,11 +19,11 @@ $contracts=@{
 }
 $policies=@($combined.GetPoliciesResponse.response.policies.policy)
 Assert-True ($policies.Count -eq 10) 'Expected ten combined policies'
-Assert-True (@(Get-ChildItem $directory -Filter '*.xcep.xml').Count -eq 11) 'Expected combined export plus ten singles'
+Assert-True (@(Get-ChildItem $directory -Filter '*.json').Count -eq 11) 'Expected combined export plus ten singles'
 foreach($policy in $policies){
  $name=[string]$policy.attributes.commonName;Assert-True ($contracts.ContainsKey($name)) "Unexpected example $name"
  Assert-TemplatePolicyInput $combined $policy
- $single=Read-TemplatePolicyDocument ([IO.File]::ReadAllText((Join-Path $directory ($name+'.xcep.xml'))))
+ $single=Read-TemplatePolicyDocument ((Get-Content (Join-Path $directory ($name+'.json')) -Raw|ConvertFrom-Json).TemplateXml)
  $one=@($single.GetPoliciesResponse.response.policies.policy)
  Assert-True ($one.Count -eq 1) "Not a single policy: $name"
  Assert-True ($one[0].OuterXml -ceq $policy.OuterXml) "Single policy drift: $name"
@@ -45,9 +45,9 @@ foreach($policy in $policies){
 }
 'PASS: all ten example policies, independent EKU/flag/period contracts, exact singles and OID references.'
 # A complete custom-policy companion is structural coverage even without pkix.net.
-$custom=Read-TemplatePolicyDocument ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.xcep.xml')))
+$custom=Read-TemplatePolicyDocument ((Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.json') -Raw|ConvertFrom-Json).TemplateXml)
 Assert-TemplatePolicyInput $custom $custom.GetPoliciesResponse.response.policies.policy
-$registration=Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.registrations.json') -Raw|ConvertFrom-Json
+$registration=(Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.json') -Raw|ConvertFrom-Json).PolicyRegistrations
 if($registration[0] -is [array]){throw 'Registration JSON must yield flat objects, not a nested array'}
 Assert-True ($registration.Count -eq 1 -and $registration[0].Oid -ceq '1.2.3.4' -and $registration[0].OidGroup -ceq 'ApplicationPolicy' -and -not [string]::IsNullOrWhiteSpace($registration[0].FriendlyName)) 'Custom fixture companion incomplete'
 $oidMap=@{};foreach($oid in $custom.GetPoliciesResponse.oIDs.oID){$oidMap[[string]$oid.oIDReferenceID]=[string]$oid.value}

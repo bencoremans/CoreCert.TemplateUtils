@@ -4,11 +4,11 @@ if(-not $LibraryPath -and -not (Get-Module -ListAvailable PSPKI)){'SKIP: custom 
 if($LibraryPath){Add-Type -Path (Join-Path $LibraryPath 'SysadminsLV.Asn1Parser.dll');Add-Type -Path (Join-Path $LibraryPath 'SysadminsLV.PKI.dll');$stub=New-Module -Name PSPKI -ScriptBlock {};Import-Module $stub}else{Import-Module PSPKI}
 . (Join-Path $PSScriptRoot '../TemplateVerification.ps1')
 . (Join-Path $PSScriptRoot '../TemplatePolicyRegistration.ps1')
-$doc=Read-TemplatePolicyDocument ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.xcep.xml')))
+$doc=Read-TemplatePolicyDocument ((Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.json') -Raw|ConvertFrom-Json).TemplateXml)
 $policy=$doc.GetPoliciesResponse.response.policies.policy;Assert-TemplatePolicyInput $doc $policy
 $expect=Get-TemplateXmlExpectation $doc $policy 'Example custom application policy'
 if(($expect.pKIExtendedKeyUsage -join ',') -cne '1.3.6.1.5.5.7.3.1' -or ($expect['msPKI-Certificate-Application-Policy'] -join ',') -cne '1.2.3.4'){throw 'Custom application policy was conflated with EKU'}
-$registration=Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.registrations.json') -Raw|ConvertFrom-Json
+$registration=(Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.json') -Raw|ConvertFrom-Json).PolicyRegistrations
 if($registration[0] -is [array]){throw 'Registration JSON must yield flat objects, not a nested array'}
 $context=[pscustomobject]@{Server='dc.example.test';ConfigurationNamingContext='CN=Configuration,DC=example,DC=test';OidBase='CN=OID,DC=example,DC=test'}
 function Get-TemplateImplicitConfiguration { 'CN=Configuration,DC=example,DC=test' }

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Returns the properties of either a single or all Active Directory Certificate Template(s).
 

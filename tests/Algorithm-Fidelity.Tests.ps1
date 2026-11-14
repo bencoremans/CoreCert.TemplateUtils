@@ -26,7 +26,7 @@ try{
    templatePSPKI=[pscustomobject]@{Name='AlgorithmFidelity';DisplayName='Algorithm fidelity';OID=[Security.Cryptography.Oid]::new('1.2.3.4.5','Algorithm fidelity');SchemaVersion=$case.Schema;Version='100.5';Settings=[pscustomobject]@{Cryptography=$crypto;SupersededTemplates=@();RegistrationAuthority=[pscustomobject]@{SignatureCount=0};KeyArchivalSettings=[pscustomobject]@{KeyArchival=$false};SubjectName=9;EnrollmentOptions=0;GeneralFlags=131649;Extensions=@([pscustomobject]@{Oid=[Security.Cryptography.Oid]::new('2.5.29.15','Key Usage');Critical=$true;RawData=[byte[]]@(3,2,5,160)})}}
    templateADO=[pscustomobject]@{Name='AlgorithmFidelity';'msPKI-Private-Key-Flag'=101056512;pKIExpirationPeriod=[BitConverter]::GetBytes([long]-315360000000000);pKIOverlapPeriod=[BitConverter]::GetBytes([long]-36288000000000)}
   }
-  [xml]$doc=Export-ADCSTemplate $source
+  [xml]$doc=ConvertTo-TemplateXml $source
   $ns=[Xml.XmlNamespaceManager]::new($doc.NameTable);$ns.AddNamespace('p','http://schemas.microsoft.com/windows/pki/2009/01/enrollmentpolicy')
   $a=$doc.SelectSingleNode('/p:GetPoliciesResponse/p:response/p:policies/p:policy/p:attributes',$ns)
   $ref=$a.SelectSingleNode('p:privateKeyAttributes/p:algorithmOIDReference',$ns)

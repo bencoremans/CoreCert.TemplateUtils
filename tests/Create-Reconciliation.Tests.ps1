@@ -40,7 +40,7 @@ function New-StoredFixture {
 }
 $fixture=New-Fixture;$fixture.templatePSPKI.Version='100.5'
 $fixture.templateADO.'msPKI-Private-Key-Flag'=101056512
-[xml]$doc=Export-ADCSTemplate $fixture
+[xml]$doc=ConvertTo-TemplateXml $fixture
 $expected=Get-TemplateXmlExpectation $doc $doc.GetPoliciesResponse.response.policies.policy $fixture.templatePSPKI.DisplayName
 $script:writeFailure=$false;$script:ignoreWrite=$false
 # Each fault passes through the actual importer create branch, actual planner,
@@ -58,7 +58,7 @@ $faults=@(
 try{
  foreach($fault in $faults){
   $script:fault=$fault;$script:creates=0;$script:repairs=0
-  Import-ADCSTemplate $doc.OuterXml -Server dc.test | Out-Null
+  Import-TemplateXml $doc.OuterXml -Server dc.test | Out-Null
   Assert-Equal $script:creates 1 'One COM create'
   Assert-Equal $script:repairs 1 'One LDAP reconciliation'
   Assert-Equal $script:stored.revision 100 'Major preserved'
@@ -76,7 +76,7 @@ try{
   {param($a);$a['msPKI-RA-Application-Policies']+='broken'}
  )){
   $script:fault=$fault;$script:repairs=0
-  Assert-Throws {Import-ADCSTemplate $doc.OuterXml -Server dc.test} '*'
+  Assert-Throws {Import-TemplateXml $doc.OuterXml -Server dc.test} '*'
   Assert-Equal $script:repairs 0 'Unsupported state stops before LDAP repair'
  }
  # Empty XML metadata removes only that tuple, retaining other valid crypto tokens.
@@ -98,10 +98,10 @@ try{
  $legacy['msPKI-Template-Schema-Version']=3;$a['msPKI-Template-Schema-Version']=3
  Assert-Equal (Get-TemplateCreateReconciliationPlan $legacy $a).Count 1 'Schema3 supports packed syntax'
  $script:fault=$faults[0];$script:repairs=0;$script:ignoreWrite=$true
- Assert-Throws {Import-ADCSTemplate $doc.OuterXml -Server dc.test} '*Verification failed*'
+ Assert-Throws {Import-TemplateXml $doc.OuterXml -Server dc.test} '*Verification failed*'
  Assert-Equal $script:repairs 1 'Ignored storage write detected without retry'
  $script:ignoreWrite=$false;$script:writeFailure=$true;$script:repairs=0
- Assert-Throws {Import-ADCSTemplate $doc.OuterXml -Server dc.test} '*Simulated LDAP refusal*'
+ Assert-Throws {Import-TemplateXml $doc.OuterXml -Server dc.test} '*Simulated LDAP refusal*'
  Assert-Equal $script:repairs 1 'LDAP failure not retried'
  Write-Output 'PASS: real importer create flow, eight reset cases, strict verification, revision/unknown-field preservation, no-op and fail-closed behavior.'
 }finally{Remove-Module $stub -Force}

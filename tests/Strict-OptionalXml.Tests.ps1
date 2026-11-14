@@ -6,7 +6,7 @@ $ErrorActionPreference='Stop'
 $stub=New-Module -Name PSPKI -ScriptBlock {};Import-Module $stub
 if($LibraryPath){Add-Type -Path (Join-Path $LibraryPath 'SysadminsLV.Asn1Parser.dll');Add-Type -Path (Join-Path $LibraryPath 'SysadminsLV.PKI.dll')}
 $fixture=New-Fixture
-[xml]$doc=Export-ADCSTemplate $fixture
+[xml]$doc=ConvertTo-TemplateXml $fixture
 if($SourceXml){$doc=Read-TemplatePolicyDocument ([IO.File]::ReadAllText((Resolve-Path $SourceXml)))}
 Set-StrictMode -Version Latest
 try{

@@ -6,7 +6,7 @@ $ErrorActionPreference='Stop'
 $stub=New-Module -Name PSPKI -ScriptBlock {}; Import-Module $stub
 try {
     $fixture=New-Fixture
-    [xml]$doc=Read-TemplatePolicyDocument (Export-ADCSTemplate $fixture)
+    [xml]$doc=Read-TemplatePolicyDocument (ConvertTo-TemplateXml $fixture)
     Assert-TemplatePolicyInput $doc $doc.GetPoliciesResponse.response.policies.policy
     Assert-Throws { Read-TemplatePolicyDocument '<GetPoliciesResponse/>' } '*MS-XCEP*'
     Assert-Throws { Read-TemplatePolicyDocument '<!DOCTYPE x [<!ENTITY t "bad">]><x>&t;</x>' } '*'
@@ -23,11 +23,11 @@ try {
     $doc.GetPoliciesResponse.oIDs.oID[-1].group='7'
     Assert-Throws { Assert-TemplatePolicyInput $doc $policy } '*incorrect group*'
     $fixture.templatePSPKI.Version='broken'
-    Assert-Throws { Export-ADCSTemplate $fixture } '*Invalid source template version*'
+    Assert-Throws { ConvertTo-TemplateXml $fixture } '*Invalid source template version*'
     $fixture=New-Fixture
     # Identical OID strings used in two groups must get distinct references.
     $fixture.templatePSPKI.Settings.Extensions[0].Oid=$fixture.templatePSPKI.OID
-    [xml]$groups=Export-ADCSTemplate $fixture
+    [xml]$groups=ConvertTo-TemplateXml $fixture
     Assert-Equal @($groups.GetPoliciesResponse.oIDs.oID | Where-Object value -eq '1.2.3.4.5').Count 2 'OID groups remain distinct'
     Assert-Equal ((Get-TemplateUpdateRevision 100 5 100 2 $false $false) -join '.') '100.5' 'No downgrade on no-op'
     Assert-Equal ((Get-TemplateUpdateRevision 100 5 100 2 $true $false) -join '.') '100.6' 'Content advances current minor'

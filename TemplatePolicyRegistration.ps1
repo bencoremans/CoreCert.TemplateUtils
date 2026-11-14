@@ -1,4 +1,4 @@
-﻿. (Join-Path $PSScriptRoot 'TemplateDirectory.ps1')
+. (Join-Path $PSScriptRoot 'TemplateDirectory.ps1')
 . (Join-Path $PSScriptRoot 'TemplateVerification.ps1')
 
 function Get-TemplatePolicyReferences {
@@ -44,15 +44,15 @@ function ConvertFrom-TemplatePolicyRegistration {
     [pscustomobject]@{ Oid=[string]$v['msPKI-Cert-Template-OID']; OidGroup=$group; FriendlyName=[string]$v['displayName'] }
 }
 
-function Export-ADCSTemplatePolicyRegistration {
+function Get-TemplateBundleRegistrations {
     <#
     .SYNOPSIS
-        Exports AD policy registrations referenced by template XML as companion metadata.
+        Reads source AD policy registrations for the internal JSON bundle exporter.
     .DESCRIPTION
         Reads the selected source DC. OIDs without AD registrations (including built-in
         policies) are omitted. CPS, notices, localized names and group links are rejected.
-        Pipe the returned objects to ConvertTo-Json and supply them as PolicyRegistrations
-        to Import-ADCSTemplate. Original numeric policy OIDs are preserved.
+        The public exporter embeds the returned objects as PolicyRegistrations
+        in its JSON bundle. Original numeric policy OIDs are preserved.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$XmlString, [string]$Server)

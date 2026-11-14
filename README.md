@@ -1,521 +1,132 @@
 # CoreCert.TemplateUtils
 
-PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required.
+PowerShell tools for AD CS certificate-template export, import/update and removal.
+Version **3.0.0** is a breaking change: public import and export use one JSON bundle.
+Standalone XML and separate registration sidecars are no longer accepted public formats.
 
-## Background
+## Requirements
 
-Vadims Podans ([@Crypt32](https://github.com/Crypt32)) discovered that the COM interfaces used by MS-XCEP can be reused to export certificate templates to a portable XML format and import them into any AD forest without requiring a forest trust. His approach is documented in [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx).
-
-This module builds on that foundation with:
-
-- **Idempotent import**: `Import-ADCSTemplate` automatically detects whether a template is new (create via COM) or already exists (diff → write supported changed attributes via LDAP → advance revision without downgrading → verify). No separate update step needed.
-- **Multi-tenant name override**: import the same XML under a different name per customer/forest.
-- **No AD module required**: all functions use `System.DirectoryServices` directly. PSPKI is needed for export and for import verification of Application Policies or Certificate Policies.
-
----
-
-## Prerequisites
-
-- PowerShell 5.1 or newer
-- Windows Server 2008 R2 / Windows 7 or newer (CertEnroll COM for import)
-- [PSPKI module](https://github.com/Crypt32/PSPKI) (`Install-Module PSPKI -AllowClobber`) — required for export and for imports containing Application Policies or Certificate Policies; loaded automatically when needed
-- Enterprise Administrator permissions (templates are stored in the AD Configuration partition)
-
----
-
-## Installation
+Use Windows PowerShell 5.1 on a domain member with CertEnroll and the required AD
+template/OID permissions. Install PSPKI separately (`Install-Module PSPKI`) or use your
+approved existing installation. The module does not upgrade dependencies, change template
+ACLs, publish templates to a CA or issue certificates. Directory writes target the selected
+writable DC; PSPKI registration also requires the same forest in the executing context.
 
 ```powershell
-# From PowerShell Gallery
-Install-Module CoreCert.TemplateUtils
-
-# Or clone and import manually
 Import-Module .\CoreCert.TemplateUtils.psd1
-```
-
----
-
-## How it works
-
-### Export (`Export-ADCSTemplate`)
-
-Reads template objects via PSPKI's `Get-CertificateTemplate` (for settings/extensions) and `Get-ADCSTemplate` (for AD-specific attributes like `msPKI-Private-Key-Flag`), then serializes them to an **MS-XCEP-compatible XML string**.
-
-### Import / Update (`Import-ADCSTemplate`)
-
-A single function that handles the full lifecycle:
-
-| Situation | Behaviour |
-|-----------|-----------|
-| Template does **not** exist | Create via `CX509CertificateTemplateADWritable` COM (new OID minted automatically) |
-| Template **exists** (same name) | Diff supported XCEP attributes; update via LDAP; advance revision without downgrading; verify |
-| No changes detected | Read back and verify; nothing written |
-
-**Attributes written by the update path:**
-
-| Category | Attributes |
-|----------|-----------|
-| Integer flags | `msPKI-Private-Key-Flag`, `msPKI-Certificate-Name-Flag`, `msPKI-Enrollment-Flag`, `flags`, `msPKI-Template-Schema-Version`, `pKIDefaultKeySpec`, `msPKI-Minimal-Key-Size`, `msPKI-RA-Signature` |
-| Binary periods | `pKIExpirationPeriod` (validity), `pKIOverlapPeriod` (renewal) |
-| Display name | `displayName` |
-| Version | `revision`, `msPKI-Template-Minor-Revision` |
-
-> **Note:** `pKIExtendedKeyUsage`, `msPKI-Certificate-Application-Policy`, and `pKICriticalExtensions` are set by the COM layer during create and are embedded in extension blobs — not separately represented in MS-XCEP XML. Verification checks these values after creation and on existing templates. The updater does not repair them: unsupported differences terminate before changing that template. Correct them separately before retrying.
-
-### Multi-tenant / multi-forest name override
-
-Use `-Name` and `-DisplayName` to override the template identity in memory before import. The source XML on disk is never modified. On create, the importer supplies a temporary unique OID to MS-XCEP; CertEnroll performs the final registration.
-
-```powershell
-# Same XML, different name per customer
-Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer"    -DisplayName "ACME Web Server"
-Import-ADCSTemplate -XmlString $xml -Name "CONTOSO-WebServer" -DisplayName "Contoso Web Server"
-```
-
----
-
-## Functions
-
-### `Export-ADCSTemplate`
-
-Exports one or more certificate template objects to an MS-XCEP XML string.
-
-```powershell
-# Export a single template
-$t = @{
-    templatePSPKI = Get-CertificateTemplate -Name "CC-WebServer"
-    templateADO   = Get-ADCSTemplate        -Name "CC-WebServer"
+$server = 'dc01.example.test'
+$template = @{
+    templatePSPKI = Get-CertificateTemplate -Name 'Example-ServerTLS'
+    templateADO = Get-ADCSTemplate -Name 'Example-ServerTLS' -Server $server
 }
-$xml = Export-ADCSTemplate -Template $t
+$json = Export-ADCSTemplate -Template $template -Server $server
+$json | Set-Content .\Example-ServerTLS.json -Encoding UTF8
 
-# Export multiple templates
-$templates = "CC-WebServer","CC-ClientAuth" | ForEach-Object {
-    @{
-        templatePSPKI = Get-CertificateTemplate -Name $_
-        templateADO   = Get-ADCSTemplate        -Name $_
-    }
-}
-$xml = Export-ADCSTemplate -Template $templates
-
-# Save to file (version control friendly)
-$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding UTF8
+# Review a single-template import before creating a new target identity.
+$json = Get-Content .\Example-ServerTLS.json -Raw
+Import-ADCSTemplate -JsonString $json -Server $server `
+    -Name 'Example-ServerTLS-Copy' -DisplayName 'Example Server TLS Copy' -WhatIf
+Import-ADCSTemplate -JsonString $json -Server $server `
+    -Name 'Example-ServerTLS-Copy' -DisplayName 'Example Server TLS Copy'
 ```
 
-**Parameters:**
+Export multiple templates by passing an array of `templatePSPKI`/`templateADO` pairs.
+The resulting bundle contains all templates in one internal XML document, with deduplicated
+policy registration metadata. `-Name` is allowed only for a single-template bundle.
+Use [the example bundles](examples/templates/README.md) individually before considering a
+larger import. A name that already exists follows the update path.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-Template` | `hashtable[]` | Yes | One or more hashtables with `templatePSPKI` (from PSPKI) and `templateADO` (from `Get-ADCSTemplate`) keys |
+## Bundle contract
 
-**Requires:** an installed PSPKI module (`Install-Module PSPKI`). The export function loads
-PSPKI on demand if it is not already loaded. It does not install PSPKI or force a reload.
-Import verification loads PSPKI on demand when decoding Application Policies or Certificate Policies. Module import, Get and Remove do not load PSPKI. Loading failures retain
-the underlying error message. The input still requires the existing PSPKI and AD objects;
-this change does not add template lookup by name to the export function.
-
----
-
-### `Import-ADCSTemplate`
-
-Imports certificate templates from MS-XCEP XML into Active Directory — creates if new, updates if already present.
-
-```powershell
-# Basic import — original name preserved
-Import-ADCSTemplate -XmlString $xml
-
-# Import to a specific DC
-Import-ADCSTemplate -XmlString $xml -Server "dc01.contoso.com"
-
-# Import with a new name (multi-tenant)
-Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server"
-
-# Version control: start at a clean baseline version
-Import-ADCSTemplate -XmlString $xml -Name "CC-WebServer" -Version "100.1"
-
-# Dry-run (no writes)
-Import-ADCSTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-XmlString` | `string` | Yes | MS-XCEP XML from `Export-ADCSTemplate` |
-| `-Name` | `string` | No | New template CN in AD. Overrides original name. Only valid for single-template XML. |
-| `-DisplayName` | `string` | No | New display name in AD. Defaults to `-Name` if not specified. |
-| `-Version` | `string` | No | Version as `"major.minor"` (e.g. `"100.1"`). Overrides source version. |
-| `-Server` | `string` | No | Target DC FQDN. Defaults to nearest writable DC. |
-| `-Domain` | `string` | No | Compatibility parameter; the forest configuration context is discovered from `-Server`. |
-
----
-
-### `Get-ADCSTemplate`
-
-Reads template properties directly from the AD Configuration partition using `System.DirectoryServices`. No ActiveDirectory module required.
-
-```powershell
-# List all templates
-Get-ADCSTemplate
-
-# Retrieve a specific template
-Get-ADCSTemplate -Name "CC-WebServer"
-
-# From a specific DC
-Get-ADCSTemplate -Server "dc01.contoso.com"
-
-# Sorted overview
-Get-ADCSTemplate | Sort-Object Name | Format-Table Name, Created, Modified
-
-# Inspect ACLs
-$t = Get-ADCSTemplate -Name "CC-WebServer"
-$t.nTSecurityDescriptor
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-Name` | `string` | No | Template CN to retrieve. Returns all templates if omitted. |
-| `-Server` | `string` | No | Target DC FQDN. Defaults to nearest DC. |
-
----
-
-### `Remove-ADCSTemplate`
-
-Resolves the template's exact `msPKI-Cert-Template-OID` and looks for a unique registration
-with `flags=1`. Display names are never used to select an OID. Shared OIDs, ambiguous
-registrations and non-template OID types stop the operation before deletion.
-
-One `ShouldProcess` decision covers both deletes. `-WhatIf` and declined confirmation
-perform no deletes. A missing template returns without deleting anything; a missing OID
-allows template-only removal. The LDAP deletes are sequential, **not atomic**. If the
-second delete fails, the error identifies the remaining OID and no full-success message
-is emitted. Avoid concurrent administrative changes during removal. This is not an
-orphan-scanning tool and does not remove unrelated OID registrations.
-
-```powershell
-# Remove (prompts for confirmation)
-Remove-ADCSTemplate -Name "CC-WebServer"
-
-# Remove without confirmation
-Remove-ADCSTemplate -Name "CC-WebServer" -Confirm:$false
-
-# Dry-run
-Remove-ADCSTemplate -Name "CC-WebServer" -WhatIf
-```
-
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `-Name` | `string` | Yes | CN of the template to remove |
-| `-Server` | `string` | No | Target DC FQDN |
-| `-Domain` | `string` | No | Compatibility parameter; configuration context is read from the selected DC. |
-
----
-
-## Full workflow example
-
-```powershell
-Import-Module PSPKI
-Import-Module CoreCert.TemplateUtils
-
-# 1. Export templates from source forest
-$templates = "CC-WebServer","CC-ClientAuth" | ForEach-Object {
-    @{
-        templatePSPKI = Get-CertificateTemplate -Name $_
-        templateADO   = Get-ADCSTemplate        -Name $_
-    }
-}
-$xml = Export-ADCSTemplate -Template $templates
-
-# Save for version control
-$xml | Set-Content -Path ".\templates\CC-Templates.xml" -Encoding UTF8
-
-# 2. Import into target forest — same names
-Import-ADCSTemplate -XmlString $xml -Server "dc01.target.com"
-
-# 3. Or import with a customer-specific name (single template XML only)
-$singleXml = Export-ADCSTemplate -Template @{
-    templatePSPKI = Get-CertificateTemplate -Name "CC-WebServer"
-    templateADO   = Get-ADCSTemplate        -Name "CC-WebServer"
-}
-Import-ADCSTemplate -XmlString $singleXml `
-    -Name "ACME-WebServer" `
-    -DisplayName "ACME Web Server" `
-    -Server "dc01.acme.com"
-
-# 4. Re-import after updating the source template — automatically updates or no-ops
-Import-ADCSTemplate -XmlString $updatedXml -Server "dc01.acme.com"
-
-# 5. Inspect result
-Get-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
-
-# 6. Clean up
-Remove-ADCSTemplate -Name "ACME-WebServer" -Server "dc01.acme.com"
-```
-
----
-
-## Prior module testing
-
-- Windows Server 2019 / 2022
-- PowerShell 5.1
-- PSPKI 4.4.0
-- AD CS Enterprise CA
-
----
-
-## References
-
-- [Export and import certificate templates with PowerShell](https://www.sysadmins.lv/blog-en/export-and-import-certificate-templates-with-powershell.aspx) — Vadims Podans
-- [MS-XCEP: X.509 Certificate Enrollment Policy Protocol](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-xcep/)
-- [MS-CRTD: Certificate Template Structure](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-crtd/)
-- [PSPKI PowerShell module](https://github.com/Crypt32/PSPKI)
-
-## Credits
-
-Original export/import technique by [Vadims Podans](https://www.sysadmins.lv/). This module extends his approach with idempotent import/update, multi-tenant name override, comprehensive attribute diffing, and template cleanup support.
-
-
-## Export fidelity and validation
-
-Export requires both the PSPKI template object and the full `Get-ADCSTemplate` object. EKUs use the PSPKI extension. Application Policies are encoded separately with pkix.net from LDAP `msPKI-Certificate-Application-Policy`, with criticality from `pKICriticalExtensions`. An absent application-policy attribute does not copy the EKU list.
-The AD object supplies the original private-key flags and the exact binary validity/renewal
-intervals. Intervals that cannot be represented as whole MS-XCEP seconds are rejected;
-they are never rounded or reconstructed from display text.
-
-Text is XML-escaped and the completed document is parsed before it is returned. Provider
-names use `ProviderList`, with `CSPList` as a compatibility fallback. A missing property
-is an error; an existing empty list still means no explicit provider restriction.
-
-Save and read XML explicitly as UTF-8:
-
-```powershell
-$xml | Set-Content -LiteralPath '.\template.xml' -Encoding UTF8
-$xml = Get-Content -LiteralPath '.\template.xml' -Raw -Encoding UTF8
-Import-ADCSTemplate -XmlString $xml
-```
-
-Template permissions are deliberately configured separately with PSPKI in the destination.
-The exported private-key security descriptor is not the template DACL.
-### Mandatory verification after import/update
-
-Before returning success, `Import-ADCSTemplate` reads fresh LDAP data from the same DC
-used for the write. This also runs when the update comparison finds nothing to change.
-Expectations come from the input XML, including `-Name` and `-DisplayName` overrides.
-For an existing template, a newer source revision is adopted. Changed content with an
-equal/older source advances the current minor revision; unchanged content preserves the
-current revision. Repeated import therefore does not keep increasing or lowering it.
-An explicit `-Version` downgrade is rejected. The effective revision is verified. Verification compares the XML with fresh LDAP data. Application Policies and Certificate Policies are decoded using the pkix.net classes shipped with PSPKI.
-
-| Checked settings | Comparison |
-|---|---|
-| Name, display name, revisions, schema, flags, key spec and size, RA signature count | Exact values; signed/unsigned 32-bit flags normalized |
-| Validity and renewal | Exact binary intervals; a one-second difference fails |
-| Provider list | Provider names in their numeric preference order |
-| Algorithm, request hash, CNG key usage, private-key SDDL | Decoded `msPKI-RA-Application-Policies`; Windows OID registry resolves algorithm names |
-| Supersedence, RA policies, EKUs, application policies, issuance policy OIDs, critical extensions | Order-independent lists |
-| Key usage, basic constraints, OCSP no-check | Supported extension data compared with LDAP attributes/flags |
-| Key archival algorithm and length | Checked when specified by the XML |
-
-A mismatch is a **terminating error** listing `Property`, `Expected` and `Actual`.
-The same objects are available in `$_.Exception.Data['Differences']`:
-
-```powershell
-try {
-    Import-ADCSTemplate -XmlString $xml -Server 'dc01.contoso.com'
-} catch {
-    $_.Exception.Data['Differences'] | Format-Table Property, Expected, Actual -Wrap
-    throw
+```json
+{
+  "FormatVersion": 1,
+  "TemplateXml": "<GetPoliciesResponse>...</GetPoliciesResponse>",
+  "PolicyRegistrations": [
+    {"Oid":"1.2.3.4","OidGroup":"ApplicationPolicy","FriendlyName":"Example policy"}
+  ]
 }
 ```
 
-Creation uses bounded XML reconciliation before final verification, as described below;
-the existing update path retains its own supported write scope. Committed changes remain
-in AD on failure. There is no automatic rollback or delete/recreate. Multi-template
-imports can be partly completed when a later template fails; inspect that state first.
+The shortened XML above is illustrative, not an importable profile. `1.2.3.4` is an offline
+placeholder, not an assigned enterprise namespace. Use authorized OIDs for actual policies.
 
-All policies are preflighted before the first write. Unknown extension OIDs and policy
-qualifiers are rejected because this verifier cannot establish their complete LDAP
-representation. Existing XML files using those features require further verifier support;
-they are not silently accepted. SDDL is compared literally, so equivalent reordered SDDL
-can produce a conservative mismatch. Windows must resolve the stored algorithm names;
-unresolved names also fail verification.
+`FormatVersion` must be integer 1. `TemplateXml` is the internal MS-XCEP representation;
+`PolicyRegistrations` must always be an array, including `[]` or one entry. Each registration
+contains exactly `Oid`, `OidGroup` (`ApplicationPolicy` or `IssuancePolicy`) and `FriendlyName`.
+Unknown fields, malformed XML, invalid metadata and unsupported versions are rejected.
 
-Excluded: template DACL (managed separately), source template identity OIDs and identity
-extension payloads (which change across forests/renames), directory-generated metadata,
-CA publication and actual certificate enrollment. Optional companion policy registrations
-are verified separately as described below.
-Only settings represented by the supported XML are verified; this is not a byte-for-byte
-copy of every source directory attribute. Enrollment remains a separate lab check.
+Export reads referenced policy registrations automatically from the selected source DC.
+It preserves their numeric OID, type and actual display name. Missing source registrations
+produce no invented metadata: the numeric policy reference remains in XML. Absence does
+not classify an OID as built-in and does not guarantee complete environment portability.
+CPS, user notices, localized names and group links require explicit migration decisions;
+currently these registration attributes are rejected rather than silently omitted.
 
-`-WhatIf` performs no writes or verification of a proposed create/update. A genuine no-op
-can still read and verify the existing template. A display-name difference on an existing
-template is updated and verified.
+Import validates the whole bundle before writes. Referenced registrations already present
+must match; missing registrations represented in the bundle are created before any template.
+The same numeric OID cannot be supplied twice, including in different policy groups, because
+the registration backend cannot safely represent that conflict. XML OIDs without bundle
+registration metadata remain unchanged; no friendly name is guessed. Registration visibility
+is bounded by `-PolicyRegistrationTimeoutSeconds` (default 120 seconds).
 
-Run the offline regression checks (no AD writes or installed PSPKI required):
+## Create, update and verification
 
-```powershell
-powershell.exe -NoProfile -File .\tests\Export-Serialization.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Export-Dependency.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Import-Verification.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Import-ControlFlow.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Review-Fixes.Tests.ps1
-```
+Creation allocates a new template identity/OID. Template names can be overridden without
+changing application/issuance policy OIDs. COM creation is followed by fresh AD readback and
+bounded reconciliation from the XML for supported attributes that COM did not preserve.
+This corrects the observed schema4 SHA256-to-SHA1 storage reset in the tested profile.
+Reconciliation belongs to that same create and does **not** increment its source revision.
 
-The fixtures check XML escaping, Unicode, both provider property names, exact AD intervals,
-raw flags and extension bytes, plus rejection of missing/inconsistent source data. They do
-not replace Windows PowerShell 5.1 tests with real PSPKI objects and CertEnroll in a lab.
+Supported repair includes flags, intervals, key size/specification, provider lists, key usage,
+policy lists and understood packed cryptographic metadata. Identity, template OID, schema and
+revision are not blindly repaired. Unsupported or ambiguous differences stop the operation.
+Unknown registration metadata is not discarded. Optional XML containers retain their defaults.
+A numeric `uSNChanged` comparison detects observed changes before repair; it is an optimistic
+check, not an atomic protection against every concurrent modification.
 
-The verification tests cover silent key-size resets, hash/provider drift, one-second
-interval differences, missing values, criticality and application-policy differences,
-malformed crypto metadata, unsigned flags, unsupported extensions and structured errors.
-Control-flow tests replace AD/COM boundaries with test doubles and exercise create,
-update, no-op, multi-policy isolation, pinned DC selection and WhatIf.
+For an existing template, supported changes use the existing update path and advance the
+revision without downgrading; identical imports are no-ops. Unsupported updates fail before
+that template is modified. Fresh verification is required after create, update and no-op.
+`-WhatIf` does not write; `-Confirm` is honored. Structural validation is not a transaction:
+errors during an actual multi-object operation can leave earlier registrations/templates.
+There is no automatic rollback, retry, deletion or revision compensation.
 
-Verification now has Windows PowerShell 5.1 offline coverage and one real schema4
-WebServer import/reconciliation/export test. Broader RSA/CSP, RSA/KSP and ECC schema3/4
-profiles, permissions, replication and enrollment still require lab validation. The
-"Prior module testing" list describes the earlier module, not blanket coverage of this change.
-
-## Review tracking (2.3.0 draft)
-
-| Issue | Implemented changes | Regression coverage |
-|---|---|---|
-| [#3](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/3) | Exact OID ownership, ambiguity/shared-use rejection, one confirmation, partial failure reporting | Wrong type, duplicate registration, shared reference, missing objects, WhatIf, failed second delete |
-| [#4](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/4) | Literal LDAP filters, forest context on a pinned DC, paging, resource disposal and terminating read errors | Get/Remove special-character names, import DC/context selection and read failure |
-| [#5](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/5) | Preflight every policy, required values, namespaces, OID groups, ranges, unsigned flags and one COM policy per create | Invalid second policy causes zero writes; invalid version, namespace/DTD, group and high-bit flags |
-| [#6](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/6) | Display name, non-decreasing revisions, idempotence and unsupported-difference detection before updates | Content/display changes, repeat import, downgrade/overflow and no partial unsupported update |
-| [#7](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/7) | Export fidelity, local OID table keyed by value+group, independent LDAP readback and explicit verification limits | Serialization, OID-group collision, crypto/extension drift and missing values |
-| [#8](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/8) | Packaging, documentation and five offline suites | Manifest import/export checks and PowerShell parsing |
-
-All six issues are implemented in PR #2 and remain open until merge. This remains a
-draft with one live WebServer-profile import/export validation, not broad production
-coverage. RSA/CSP, RSA/KSP, ECC, additional schema3/4 profiles, enrollment, replication
-and OID deletion need their own lab validation. No automatic merge or deployment is performed.
-
-Dependency tests cover loading PSPKI on demand, reusing a loaded module, preserving loader errors, and importing CoreCert.TemplateUtils without loading PSPKI.
-
-Run `powershell.exe -NoProfile -File .\tests\Policy-RoundTrip.Tests.ps1` with PSPKI installed to exercise the real extension classes without AD writes. The test also accepts `-LibraryPath` pointing to the PSPKI DLL directory for isolated offline testing.
-
-
-### Migrating custom policy registrations
-
-Template XML contains numeric policy OIDs, but does not carry complete AD registration
-metadata. Export the referenced AD registrations alongside the XML:
+## Removal
 
 ```powershell
-# Source forest, using the XML already produced by Export-ADCSTemplate:
-$registrations = @(Export-ADCSTemplatePolicyRegistration -XmlString $xml -Server 'dc.source.example')
-ConvertTo-Json -InputObject $registrations -Depth 4 | Set-Content '.\templates.policies.json' -Encoding UTF8
-
-# Destination forest, in a fresh PowerShell session with a stable execution identity:
-$registrations = Get-Content '.\templates.policies.json' -Raw | ConvertFrom-Json
-Import-ADCSTemplate -XmlString $xml -Server 'dc.target.example' `
-    -PolicyRegistrations $registrations -PolicyRegistrationTimeoutSeconds 120 -WhatIf
-# Remove -WhatIf after reviewing the planned actions.
+Remove-ADCSTemplate -Name 'Example-ServerTLS-Copy' -Server $server -WhatIf
 ```
 
-The companion export reads registrations directly from the chosen source DC for EKUs,
-application policies, issuance policies and RA policy requirements referenced by the XML.
-It preserves numeric OIDs and display names; it does not generate replacement policy OIDs.
-OIDs without AD registrations are omitted, including built-in policies with no AD object.
+Removal checks the exact template and its own template-identity OID registration, including
+ownership, ambiguity and sharing. It does not delete application/issuance policy registrations.
+A partial failure is reported; inspect remaining objects before deciding how to continue.
+The read-only [policy usage test](tests/integration/Policy-Usage.Integration.ps1) reports exact
+references in the supported template attributes and group links. Unknown data stays
+unknown; `DeleteAuthorized` is always false. Zero template references does not prove zero
+external certificate/application use.
 
-Before registration, all supplied metadata and existing target registrations are checked.
-Unreferenced OIDs, duplicate OIDs, ambiguous registrations, type/name conflicts and unknown
-metadata fields stop the operation. Existing matching registrations are reused unchanged.
-CPS URLs, user notices, localized names and policy-to-group links are currently rejected,
-not silently discarded or recreated. These need a separate migration procedure.
+## Tests and evidence
 
-For missing registrations, the implicit `LDAP://RootDSE` configurationNamingContext must
-match the configurationNamingContext read from `-Server`. PSPKI then performs the write
-using `Register-ObjectIdentifier -UseActiveDirectory`. Keep the execution identity unchanged
-throughout the session, including before the first pkix.net call: pkix.net caches its OID
-container path. This check does not support changing identity in an existing session.
+See [tests/README.md](tests/README.md) for isolated offline suites and explicit opt-in live
+cases. Tests do not automatically publish templates, grant enrollment rights or issue keys.
 
-The importer polls the selected target DC every 500 ms until the OID, policy type and
-name match. The configurable timeout is per registration (default 120 seconds), not an
-assumption about replication speed. A registration error or timeout prevents subsequent
-template writes. Successful registrations are not rolled back if a later operation fails;
-retry after resolving replication or other errors. PSPKI's multi-attribute registration
-itself is not transactional. Template ACLs and OID registration ACLs are not migrated.
+The preceding XML implementation passed live create/export/removal for all ten example
+profiles, WebServer update/no-op, shared application/issuance registration reuse, real PSPKI
+round trips, and sixteen isolated offline suites with actual PSPKI4.4. A separate live group-link
+probe proved detection and explicit cleanup of its isolated empty test group/issuance policy.
+These remain implementation baselines. The 3.0 JSON API separately passed all seventeen
+isolated suites with actual PSPKI4.4, plus a live two-template bundle import, automatic
+creation of two application and two issuance policy registrations, real multi-template
+export and no-op reimport. Numeric OIDs/types/names and revisions were preserved.
 
-`-WhatIf` validates and displays planned actions without registering OIDs or importing
-templates. Omitting `-PolicyRegistrations` retains the existing template-only behavior;
-it does not discover missing custom registration names from XML. PSPKI loads on demand
-for registration as well as export/policy verification.
+During separately selected cleanup, the first template and its own OID were successfully
+removed, with all guest postchecks passing. A private test caller then rejected the public
+success message plus result object as an unexpected output array. The second template
+remains, unpublished, with the four policy registrations. Further cleanup is paused pending
+reviewed continuation. This is not a completed 3.0 cleanup-lifecycle claim; the module's
+previous complete removal proof remains separate.
 
-Run `powershell.exe -NoProfile -File .\tests\Policy-Registration.Tests.ps1` for offline
-context, conflict, metadata and replication-polling checks. Import control-flow tests also
-cover registration-before-commit, timeout aborts and WhatIf. Windows AD lab testing is still
-required for real PSPKI registration, replication, permissions and CertEnroll behavior.
-
-## Verification and reconciliation after creation
-
-Some schema-4 templates lose requested cryptography settings when CertEnroll commits
-an imported policy. After creating a template, the importer reads the stored LDAP
-attributes from the selected DC. It builds a bounded correction plan from the source
-XML, checks the complete projected result, applies the supported differences in one
-LDAP commit, then verifies the stored result again. This is part of the same import:
-`revision` and `msPKI-Template-Minor-Revision` are preserved. The existing update path
-retains its normal revision advancement rules.
-
-The plan supports flags, key spec/size, exact validity/renewal intervals, provider
-preference, RA/policy/EKU lists, certificate key usage and recognized cryptographic
-metadata. Unspecified, recognized metadata is preserved. Empty metadata values remove
-only their corresponding tuple. Packed cryptography corrections require schema3 or
-schema4 without `CT_FLAG_USE_LEGACY_PROVIDER`; unsupported legacy corrections stop.
-Contradictory extension/flag combinations, unknown metadata, schema changes and revision
-mismatches stop before the corrective write. Template GUID/OID identity is retained;
-ACLs are not migrated or changed by reconciliation.
-
-The corrective write binds to the template GUID and checks numeric `uSNChanged` and
-revision against its read baseline. ADSI LargeInteger values are converted exactly to
-Int64. This is an optimistic check, **not an atomic LDAP assertion or transaction**;
-a concurrent change between that check and the commit remains possible. Use a single
-writer during import. Failure does not delete the new template/OID, retry the write,
-or roll back prior changes. Inspect the saved state before deciding how to proceed.
-
-Exports now retain explicit RSA OIDs for schema3/4 while preserving the existing legacy
-schema1/2 representation. Optional/nil XML containers are read safely under StrictMode.
-
-Validated in a Windows AD lab: one new schema4 RSA2048/SHA256 template was created via
-the public importer, automatically reconciled, and exported again using actual PSPKI
-and AD objects. The export matched source settings and retained revision100.5; the
-trial remained unpublished. Additional field-reset combinations are covered by offline
-storage/LDAP doubles, not a claim of live coverage for every profile/provider/flag.
-
-Focused offline tests (no AD writes):
-
-```powershell
-powershell.exe -NoProfile -File .\tests\Algorithm-Fidelity.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Create-Reconciliation.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Strict-OptionalXml.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Reconciliation-Usn.Tests.ps1
-powershell.exe -NoProfile -File .\tests\Import-ControlFlow.Tests.ps1
-```
-
-The create test runs the real importer/control flow and final verifier with explicit
-COM-storage/LDAP-transport doubles. The USN test includes distinct objects with identical
-COM display strings, signed low32 values, Int64 boundaries and invalid values without
-StrictMode. Execution receipts and trial-object exports remain outside this module.
-Authorized, unchanged source XML examples are included separately under examples/templates.
-
-## Try one source template
-
-The [template examples guide](examples/templates/README.md) includes the unchanged
-ten-policy source export and one file per template. Start with its single WebServer
-example and review the WhatIf operation, target name and DC. The guide lists actual
-EKUs, key sizes, periods, providers and flags, including the CC-CepEncryption naming
-discrepancy. Only WebServer has live import/export coverage here. Template ACLs, CA
-publication and enrollment remain separate steps; do not publish the whole set blindly.
-
-## Run the expanded test suite
-
-See [tests/README.md](tests/README.md) for the isolated offline runner, ten-example
-contracts, RSA/ECC/provider cases, custom ApplicationPolicy fixtures and explicit opt-in
-lifecycle, replication and enrollment scripts. Missing real pkix libraries are reported
-as Skip; integration scripts are never started by the offline runner. Added test code
-is not a claim that its live cases have run.
-
+Template import/export alone does not prove provider key operation, enrollment, TLS use,
+revocation, multi-DC replication or production suitability. A single-DC lab cannot prove
+replication. Broader crypto/field fixtures and enrollment require their own recorded results.

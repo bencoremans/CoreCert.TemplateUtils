@@ -1,4 +1,4 @@
-﻿# Uses the actual pkix.net extension classes. LibraryPath allows offline DLL testing.
+# Uses the actual pkix.net extension classes. LibraryPath allows offline DLL testing.
 param([string]$LibraryPath)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Export-Serialization.Tests.ps1')
@@ -25,7 +25,7 @@ $fixture.templateADO | Add-Member NoteProperty 'msPKI-Certificate-Application-Po
 $fixture.templateADO | Add-Member NoteProperty pKICriticalExtensions @('2.5.29.15', $applicationOid)
 
 function Get-PolicyExpectation($Template) {
-    [xml]$doc = Export-ADCSTemplate $Template
+    [xml]$doc = ConvertTo-TemplateXml $Template
     Get-TemplateXmlExpectation $doc $doc.GetPoliciesResponse.response.policies.policy $Template.templatePSPKI.DisplayName
 }
 $expected = Get-PolicyExpectation $fixture

@@ -1,4 +1,4 @@
-﻿function Import-TemplatePolicyLibrary {
+function Import-TemplatePolicyLibrary {
     param([string]$Operation, [string]$RequiredType)
     if (-not (Get-Module -Name PSPKI -ErrorAction SilentlyContinue)) {
         try {

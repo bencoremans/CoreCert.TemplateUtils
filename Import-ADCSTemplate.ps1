@@ -1,72 +1,9 @@
-<#
-.SYNOPSIS
-    Imports certificate templates into Active Directory from an MS-XCEP XML string.
-
-.DESCRIPTION
-    Imports certificate templates from the MS-XCEP GetPoliciesResponse XML produced by
-    Export-ADCSTemplate.
-
-    Import behaviour:
-    - Template does NOT exist (by name): create via CX509EnrollmentPolicyWebService /
-      CX509CertificateTemplateADWritable COM interfaces. A new OID is always minted to
-      avoid conflicts with the source template OID already registered in AD.
-    - Template DOES exist (same commonName in AD): compare the supported LDAP update attributes against
-      the serialized source. If changed: apply in-place LDAP attribute update and
-      advance the revision without downgrading. After create, update and no-op, independently verify
-      the supported XML settings against fresh LDAP data. Differences terminate the import.
-
-    Optionally override Name and DisplayName on import to deploy the same base template
-    under a different name per customer or forest.
-
-.PARAMETER XmlString
-    MS-XCEP XML string produced by Export-ADCSTemplate.
-
-.PARAMETER Name
-    Optional. Override the template CN on import. Only applies when XML contains a single policy.
-
-.PARAMETER DisplayName
-    Optional. Override the display name. Defaults to Name if not specified.
-
-.PARAMETER Version
-    Optional. Version as "major.minor" (e.g. "100.1"). Overrides source version.
-
-.PARAMETER Server
-    Optional. Target DC FQDN. Defaults to nearest writable DC.
-
-.PARAMETER PolicyRegistrations
-    Optional companion objects from Export-ADCSTemplatePolicyRegistration / ConvertFrom-Json.
-    Missing policy registrations are created via PSPKI before importing templates.
-    Existing registrations must match. The executing context must remain unchanged throughout
-    the PowerShell session, including before the first pkix.net use.
-
-.PARAMETER PolicyRegistrationTimeoutSeconds
-    Maximum wait per newly registered OID for visibility on Server. Default: 120 seconds.
-
-.PARAMETER Domain
-    Retained for compatibility. The configuration naming context is read from Server.
-
-.EXAMPLE
-    $xml = Export-ADCSTemplate -Template $t
-    Import-ADCSTemplate -XmlString $xml
-
-.EXAMPLE
-    # Multi-tenant: same XML, different name per customer
-    Import-ADCSTemplate -XmlString $xml -Name "ACME-WebServer" -DisplayName "ACME Web Server"
-
-.EXAMPLE
-    Import-ADCSTemplate -XmlString $xml -Name "TEST-WebServer" -WhatIf
-
-.NOTES
-    Requires Enterprise Administrator permissions.
-    COM interfaces require Windows Server 2008 R2 / Windows 7 or newer.
-    Update path uses System.DirectoryServices -- no ActiveDirectory module required.
-    Verification of Application Policies or Certificate Policies loads PSPKI on demand.
-#>
+# Internal XML import engine. Called only after public JSON bundle validation.
 . (Join-Path $PSScriptRoot 'TemplateVerification.ps1')
 . (Join-Path $PSScriptRoot 'TemplateDirectory.ps1')
 . (Join-Path $PSScriptRoot 'TemplatePolicyRegistration.ps1')
 
-function Import-ADCSTemplate {
+function Import-TemplateXml {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory = $true)]

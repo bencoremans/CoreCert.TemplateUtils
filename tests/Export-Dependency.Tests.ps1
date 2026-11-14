@@ -1,4 +1,4 @@
-﻿# Dependency loading boundaries, without installing or loading real PSPKI.
+# Dependency loading boundaries, without installing or loading real PSPKI.
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Export-Serialization.Tests.ps1')
 $fixture=New-Fixture
@@ -18,15 +18,15 @@ function Import-Module {
     $script:loaded=$true
 }
 try {
-    $result=@(Export-ADCSTemplate $fixture)
+    $result=@(ConvertTo-TemplateXml $fixture)
     Assert-Equal $script:loadCount 1 'Load on first use'
     Assert-Equal $result.Count 1 'Export returns only XML'
-    Export-ADCSTemplate $fixture | Out-Null
+    ConvertTo-TemplateXml $fixture | Out-Null
     Assert-Equal $script:loadCount 1 'Already loaded dependency reused'
     Assert-Throws { Import-TemplatePolicyLibrary 'Policy verification' 'Missing.Pkix.Type' } '*loaded PSPKI libraries do not provide*'
     $script:loaded=$false; $script:loaderFailure=$true
     $output=[Collections.Generic.List[object]]::new()
-    Assert-Throws { Export-ADCSTemplate $fixture | ForEach-Object { $output.Add($_) } } '*could not load*simulated DLL version conflict*'
+    Assert-Throws { ConvertTo-TemplateXml $fixture | ForEach-Object { $output.Add($_) } } '*could not load*simulated DLL version conflict*'
     Assert-Equal $output.Count 0 'No XML after loading failure'
 } finally {
     Remove-Item Function:Get-Module,Function:Import-Module
@@ -35,5 +35,10 @@ try {
 $before=@(Get-Module PSPKI).Count
 Import-Module (Join-Path $PSScriptRoot '../CoreCert.TemplateUtils.psd1') -Force
 Assert-Equal @(Get-Module PSPKI).Count $before 'Module import does not load PSPKI'
-Assert-Equal @(Get-Command -Module CoreCert.TemplateUtils).Count 5 'Public commands available'
+Assert-Equal @(Get-Command -Module CoreCert.TemplateUtils).Count 4 'Public commands available'
+Assert-Equal ((Get-Command -Module CoreCert.TemplateUtils | Sort-Object Name | ForEach-Object Name) -join ',') 'Export-ADCSTemplate,Get-ADCSTemplate,Import-ADCSTemplate,Remove-ADCSTemplate' 'Exact public command set'
+$parameters=(Get-Command CoreCert.TemplateUtils\Import-ADCSTemplate).Parameters
+Assert-Equal $parameters.ContainsKey('JsonString') $true 'Public JSON input'
+Assert-Equal $parameters.ContainsKey('XmlString') $false 'No standalone XML input'
+Assert-Equal $parameters.ContainsKey('PolicyRegistrations') $false 'No sidecar parameter'
 'PASS: export dependency loading tests'
