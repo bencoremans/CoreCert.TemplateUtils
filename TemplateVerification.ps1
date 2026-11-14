@@ -1,4 +1,4 @@
-﻿. (Join-Path $PSScriptRoot 'TemplatePolicyLibrary.ps1')
+. (Join-Path $PSScriptRoot 'TemplatePolicyLibrary.ps1')
 
 # Internal helpers. Verification reads raw LDAP, independently of CertEnroll's save path.
 function ConvertTo-TemplateInt32 {
@@ -100,18 +100,22 @@ function Get-TemplateXmlExpectation {
         if (-not [long]::TryParse([string]$pair[1], [ref]$seconds) -or $seconds -lt 0 -or $seconds -gt 922337203685) { throw "Invalid period '$($pair[0])'." }
         $expected[$pair[0]] = [Convert]::ToBase64String([BitConverter]::GetBytes([long](-[decimal]$seconds * 10000000)))
     }
-    $expected['msPKI-RA-Signature'] = if ($a.rARequirements.rASignatures) { ConvertTo-TemplateInt32 $a.rARequirements.rASignatures } else { 0 }
-    $expected['msPKI-Supersede-Templates'] = @($a.supersededPolicies.commonName | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
-    $expected['Providers'] = @($a.privateKeyAttributes.cryptoProviders.provider | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+    # Nil optional containers have no child properties. XPath keeps absence
+    # explicit and works when callers enable StrictMode.
+    $raCount=$a.SelectSingleNode('*[local-name()="rARequirements"]/*[local-name()="rASignatures"]')
+    $expected['msPKI-RA-Signature'] = if ($null -ne $raCount) { ConvertTo-TemplateInt32 $raCount.InnerText } else { 0 }
+    $expected['msPKI-Supersede-Templates'] = @($a.SelectNodes('*[local-name()="supersededPolicies"]/*[local-name()="commonName"]') | ForEach-Object { $_.InnerText })
+    $expected['Providers'] = @($a.SelectNodes('*[local-name()="privateKeyAttributes"]/*[local-name()="cryptoProviders"]/*[local-name()="provider"]') | ForEach-Object { $_.InnerText })
     $expected['AsymmetricAlgorithm'] = Resolve-Oid $a.privateKeyAttributes.algorithmOIDReference '1.2.840.113549.1.1.1'
     $expected['HashAlgorithm'] = Resolve-Oid $a.hashAlgorithmOIDReference '1.3.14.3.2.26'
     $expected['CngKeyUsage'] = if ($a.privateKeyAttributes.keyUsageProperty -is [string]) { ConvertTo-TemplateInt32 $a.privateKeyAttributes.keyUsageProperty } else { 0 }
     $expected['PrivateKeySDDL'] = if ($a.privateKeyAttributes.permissions -is [string]) { [string]$a.privateKeyAttributes.permissions } else { '' }
-    $expected['RAApplicationPolicies'] = @($a.rARequirements.rAEKUs.oIDReference | Where-Object { $null -ne $_ } | ForEach-Object { Resolve-Oid $_ })
-    $expected['msPKI-RA-Policies'] = @($a.rARequirements.rAPolicies.oIDReference | Where-Object { $null -ne $_ } | ForEach-Object { Resolve-Oid $_ })
-    if ($a.keyArchivalAttributes.symmetricAlgorithmOIDReference) {
-        $expected['SymmetricAlgorithm'] = Resolve-Oid $a.keyArchivalAttributes.symmetricAlgorithmOIDReference
-        $expected['SymmetricKeyLength'] = ConvertTo-TemplateInt32 $a.keyArchivalAttributes.symmetricAlgorithmKeyLength
+    $expected['RAApplicationPolicies'] = @($a.SelectNodes('*[local-name()="rARequirements"]/*[local-name()="rAEKUs"]/*[local-name()="oIDReference"]') | ForEach-Object { Resolve-Oid $_.InnerText })
+    $expected['msPKI-RA-Policies'] = @($a.SelectNodes('*[local-name()="rARequirements"]/*[local-name()="rAPolicies"]/*[local-name()="oIDReference"]') | ForEach-Object { Resolve-Oid $_.InnerText })
+    $symmetric=$a.SelectSingleNode('*[local-name()="keyArchivalAttributes"]/*[local-name()="symmetricAlgorithmOIDReference"]')
+    if ($null -ne $symmetric) {
+        $expected['SymmetricAlgorithm'] = Resolve-Oid $symmetric.InnerText
+        $expected['SymmetricKeyLength'] = ConvertTo-TemplateInt32 $a.SelectSingleNode('*[local-name()="keyArchivalAttributes"]/*[local-name()="symmetricAlgorithmKeyLength"]').InnerText
     }
     $expected['KeyUsage'] = 0
     $expected['BasicConstraintsPresent'] = $false
@@ -120,7 +124,7 @@ function Get-TemplateXmlExpectation {
     $expected['msPKI-Certificate-Application-Policy'] = @()
     $expected['msPKI-Certificate-Policy'] = @()
     $critical = @(); $seen = @{}
-    foreach ($extension in $a.extensions.extension) {
+    foreach ($extension in $a.SelectNodes('*[local-name()="extensions"]/*[local-name()="extension"]')) {
         if ($null -eq $extension) { continue }
         $oid = Resolve-Oid $extension.oIDReference
         if ($seen.ContainsKey($oid)) { throw "Duplicate extension '$oid'." }; $seen[$oid] = $true
@@ -173,6 +177,7 @@ function Read-TemplateVerificationState {
             $entry.RefreshCache()
             $values = @{}
             foreach ($key in $entry.Properties.PropertyNames) { $values[$key] = $entry.Properties[$key].Value }
+            if ($values.ContainsKey('uSNChanged')) { $values['uSNChanged']=ConvertTo-TemplateUsn $values['uSNChanged'] }
             return $values
         } finally { $entry.Dispose() }
     } finally { $searcher.Dispose(); $root.Dispose() }
@@ -243,6 +248,128 @@ function Compare-TemplateVerificationState {
         }
         if (-not $same) { [pscustomobject]@{ Property = $key; Expected = $want; Actual = $got } }
     }
+}
+
+function Get-TemplateCreateReconciliationPlan {
+    param([System.Collections.IDictionary]$Expected, [hashtable]$Actual)
+    $differences = @(Compare-TemplateVerificationState $Expected $Actual)
+    if (-not $differences.Count) { return }
+    $direct=@('displayName','msPKI-Private-Key-Flag','msPKI-Certificate-Name-Flag','msPKI-Enrollment-Flag','flags','pKIDefaultKeySpec','msPKI-Minimal-Key-Size','msPKI-RA-Signature','msPKI-Supersede-Templates','msPKI-RA-Policies','pKIExtendedKeyUsage','msPKI-Certificate-Application-Policy','msPKI-Certificate-Policy','pKICriticalExtensions','pKIMaxIssuingDepth')
+    $packed=@{
+        AsymmetricAlgorithm=@('msPKI-Asymmetric-Algorithm','PZPWSTR',3)
+        HashAlgorithm=@('msPKI-Hash-Algorithm','PZPWSTR',1)
+        SymmetricAlgorithm=@('msPKI-Symmetric-Algorithm','PZPWSTR',2)
+        SymmetricKeyLength=@('msPKI-Symmetric-Key-Length','DWORD',0)
+        PrivateKeySDDL=@('msPKI-Key-Security-Descriptor','PZPWSTR',0)
+        CngKeyUsage=@('msPKI-Key-Usage','DWORD',0)
+        RAApplicationPolicies=@('msPKI-RA-Application-Policies','PZPWSTR',0)
+    }
+    # Preserve well-formed unrelated metadata tokens; change only XML differences.
+    $raw=[string]$Actual['msPKI-RA-Application-Policies']
+    $tokens=[Collections.Generic.List[string]]::new()
+    if ($raw.Contains('`')) { $tokens.AddRange([string[]]$raw.TrimEnd([char]'`').Split([char]'`')) }
+    elseif ($raw) { $tokens.AddRange([string[]]@('msPKI-RA-Application-Policies','PZPWSTR',$raw)) }
+    $changes=@{}; $projected=$Actual.Clone(); $packedChanged=$false
+    foreach ($difference in $differences) {
+        $key=$difference.Property; $value=$Expected[$key]
+        if ($key -in @('cn','revision','msPKI-Template-Minor-Revision','msPKI-Template-Schema-Version')) { throw "Identity/schema/revision mismatch '$key'; nothing reconciled." }
+        if ($key -in $direct) { $changes[$key]=$value }
+        elseif ($key -in @('pKIExpirationPeriod','pKIOverlapPeriod')) { $changes[$key]=[Convert]::FromBase64String($value) }
+        elseif ($key -eq 'KeyUsage') { $changes['pKIKeyUsage']=[byte[]]@(([int]$value -band 255),(([int]$value -shr 8) -band 255)) }
+        elseif ($key -eq 'Providers') { $index=0; $changes['pKIDefaultCSPs']=@($value | ForEach-Object { $index++; "$index,$_" }) }
+        elseif ($packed.ContainsKey($key)) {
+            $spec=$packed[$key]
+            if ($spec[2] -and [string]$value) {
+                $oid=[Security.Cryptography.Oid]::FromOidValue([string]$value,[Security.Cryptography.OidGroup]$spec[2])
+                if (-not $oid.FriendlyName -or $oid.FriendlyName -match '^\d+(\.\d+)+$') { throw "Unsupported algorithm '$value'; nothing reconciled." }
+                $value=$oid.FriendlyName
+            } elseif ($key -eq 'RAApplicationPolicies') { $value=$value -join ',' }
+            $position=-1
+            for ($i=0;$i -lt $tokens.Count;$i+=3) { if ($tokens[$i] -ceq $spec[0]) { $position=$i+2 } }
+            if ([string]$value -eq '') {
+                if ($position -ge 0) { $tokens.RemoveRange($position-2,3) }
+            }
+            elseif ($position -ge 0) { $tokens[$position]=[string]$value }
+            else { $tokens.AddRange([string[]]@($spec[0],$spec[1],[string]$value)) }
+            $packedChanged=$true
+        } elseif ($key -notin @('BasicConstraintsPresent','BasicConstraintsCA','OcspNoCheck')) { throw "Unsupported post-create difference '$key'; nothing reconciled." }
+    }
+    $schema=[int]$Expected['msPKI-Template-Schema-Version']
+    $syntax2=$schema -eq 3 -or ($schema -eq 4 -and ([int]$Expected['msPKI-Private-Key-Flag'] -band 256) -eq 0)
+    if ($packedChanged -and -not $syntax2) { throw 'Legacy cryptographic metadata reconciliation is unsupported; nothing reconciled.' }
+    if ($packedChanged) { $changes['msPKI-RA-Application-Policies']=if($tokens.Count){($tokens -join '`')+'`'}else{$null} }
+    foreach ($key in $changes.Keys) { $projected[$key]=$changes[$key] }
+    if (@(Compare-TemplateVerificationState $Expected $projected).Count) { throw 'Projected reconciliation does not match XML.' }
+    return $changes
+}
+
+function ConvertTo-TemplateUsn {
+    param($Value)
+    if ($null -eq $Value) { throw 'Missing template uSNChanged.' }
+    if ($Value -is [long] -or $Value -is [int]) { $number=[long]$Value }
+    else {
+        # ADSI exposes LargeInteger as IADsLargeInteger, not a printable number.
+        # LowPart is signed Int32 but represents the unsigned low 32 bits.
+        if ([Runtime.InteropServices.Marshal]::IsComObject($Value)) {
+            $rawHigh=$Value.GetType().InvokeMember('HighPart',[Reflection.BindingFlags]::GetProperty,$null,$Value,$null)
+            $rawLow=$Value.GetType().InvokeMember('LowPart',[Reflection.BindingFlags]::GetProperty,$null,$Value,$null)
+        } else { $rawHigh=$Value.HighPart; $rawLow=$Value.LowPart }
+        if ($null -eq $rawHigh -or $null -eq $rawLow -or
+            ($rawHigh -isnot [int] -and $rawHigh -isnot [long]) -or
+            ($rawLow -isnot [int] -and $rawLow -isnot [long])) { throw 'Invalid template uSNChanged parts.' }
+        [long]$high=$rawHigh; [long]$low=$rawLow
+        if ($high -lt 0 -or $high -gt [int]::MaxValue -or $low -lt [int]::MinValue -or $low -gt [int]::MaxValue) { throw 'Invalid template uSNChanged parts.' }
+        if ($low -lt 0) { $low+=4294967296 }
+        $number=($high * [long]4294967296)+$low
+    }
+    if ($number -lt 0) { throw 'Invalid negative template uSNChanged.' }
+    return [long]$number
+}
+
+function Assert-TemplateReconciliationBaseline {
+    param([hashtable]$Baseline,[hashtable]$Current)
+    if ((ConvertTo-TemplateUsn $Current['uSNChanged']) -ne (ConvertTo-TemplateUsn $Baseline['uSNChanged'])) { throw 'Template changed before reconciliation: uSNChanged' }
+    foreach ($name in @('revision','msPKI-Template-Minor-Revision')) {
+        if ([string]$Current[$name] -cne [string]$Baseline[$name]) { throw "Template changed before reconciliation: $name" }
+    }
+}
+
+function Write-TemplateCreateReconciliation {
+    param([string]$Server, [hashtable]$Baseline, [hashtable]$Changes)
+    if (-not $Changes.Count) { return }
+    if (-not $Baseline['objectGUID'] -or $null -eq $Baseline['uSNChanged']) { throw 'Missing reconciliation identity/version baseline.' }
+    $guid=[guid]::new([byte[]]$Baseline['objectGUID'])
+    $entry=[DirectoryServices.DirectoryEntry]::new("LDAP://$Server/<GUID=$($guid.ToString('D'))>")
+    try {
+        $entry.RefreshCache()
+        # Same object and version observed during planning, including all concurrent
+        # LDAP changes via uSNChanged. This is a pre-write check, not a transaction.
+        $current=@{}
+        foreach ($name in @('uSNChanged','revision','msPKI-Template-Minor-Revision')) { $current[$name]=$entry.Properties[$name].Value }
+        Assert-TemplateReconciliationBaseline $Baseline $current
+        foreach ($name in $Changes.Keys) {
+            $value=$Changes[$name]
+            if ($null -eq $value -or ($value -is [array] -and $value.Count -eq 0)) { $entry.Properties[$name].Clear() }
+            else { $entry.Properties[$name].Value=$value }
+        }
+        $entry.CommitChanges()
+    } finally { $entry.Dispose() }
+}
+
+function Complete-TemplateCreateVerification {
+    param([System.Collections.IDictionary]$Expected, [string]$Server, [string]$TemplateBase, [guid]$ExpectedObjectGuid=[guid]::Empty)
+    $actual=Read-TemplateVerificationState $Server $TemplateBase $Expected['cn']
+    $guid=[guid]::new([byte[]]$actual['objectGUID'])
+    if ($ExpectedObjectGuid -ne [guid]::Empty -and $guid -ne $ExpectedObjectGuid) { throw 'Unexpected template identity; nothing reconciled.' }
+    $plan=Get-TemplateCreateReconciliationPlan $Expected $actual
+    if ($null -ne $plan) {
+        Write-TemplateCreateReconciliation $Server $actual $plan
+        Write-Verbose "Reconciled XML fields for '$($Expected['cn'])'; revision preserved."
+    }
+    $after=Read-TemplateVerificationState $Server $TemplateBase $Expected['cn']
+    if ([guid]::new([byte[]]$after['objectGUID']) -ne $guid) { throw 'Template identity changed during reconciliation.' }
+    if ([string]$after['msPKI-Cert-Template-OID'] -cne [string]$actual['msPKI-Cert-Template-OID']) { throw 'Template OID changed during reconciliation.' }
+    Assert-TemplateVerification $Expected $Server $TemplateBase
 }
 
 function Assert-TemplateVerification {

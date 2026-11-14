@@ -1,4 +1,4 @@
-﻿# CoreCert.TemplateUtils
+# CoreCert.TemplateUtils
 
 PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required.
 
@@ -331,10 +331,10 @@ try {
 }
 ```
 
-Verification detects differences; it does not expand the LDAP updater's write scope.
-Already committed changes remain in AD on failure. There is no automatic rollback,
-delete/recreate or post-create repair. Multi-template imports can therefore be partly
-completed when a later template fails. Correct the reported differences before retrying.
+Creation uses bounded XML reconciliation before final verification, as described below;
+the existing update path retains its own supported write scope. Committed changes remain
+in AD on failure. There is no automatic rollback or delete/recreate. Multi-template
+imports can be partly completed when a later template fails; inspect that state first.
 
 All policies are preflighted before the first write. Unknown extension OIDs and policy
 qualifiers are rejected because this verifier cannot establish their complete LDAP
@@ -374,11 +374,10 @@ malformed crypto metadata, unsigned flags, unsupported extensions and structured
 Control-flow tests replace AD/COM boundaries with test doubles and exercise create,
 update, no-op, multi-policy isolation, pinned DC selection and WhatIf.
 
-The new verification has been tested offline on PowerShell 7.4/Linux only. The
-"Prior module testing" list above describes the prior module, not validation of this change. Before
-merging, test on Windows PowerShell 5.1 with RSA/CSP, RSA/KSP and ECC schema 3/4 templates,
-including actual readback and enrollment. Include a deliberate non-updatable difference
-(e.g. EKU) and confirm that re-import terminates instead of reporting success.
+Verification now has Windows PowerShell 5.1 offline coverage and one real schema4
+WebServer import/reconciliation/export test. Broader RSA/CSP, RSA/KSP and ECC schema3/4
+profiles, permissions, replication and enrollment still require lab validation. The
+"Prior module testing" list describes the earlier module, not blanket coverage of this change.
 
 ## Review tracking (2.3.0 draft)
 
@@ -391,10 +390,10 @@ including actual readback and enrollment. Include a deliberate non-updatable dif
 | [#7](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/7) | Export fidelity, local OID table keyed by value+group, independent LDAP readback and explicit verification limits | Serialization, OID-group collision, crypto/extension drift and missing values |
 | [#8](https://github.com/bencoremans/CoreCert.TemplateUtils/issues/8) | Packaging, documentation and five offline suites | Manifest import/export checks and PowerShell parsing |
 
-All six issues are implemented in PR #2 and remain open until merge. This is a draft,
-not a release tested in AD. Lab validation must cover Windows PowerShell 5.1, RSA/CSP,
-RSA/KSP, ECC and schema 3/4 on the intended Windows versions, actual enrollment and
-OID deletion in an isolated forest. No automatic merge or deployment is performed.
+All six issues are implemented in PR #2 and remain open until merge. This remains a
+draft with one live WebServer-profile import/export validation, not broad production
+coverage. RSA/CSP, RSA/KSP, ECC, additional schema3/4 profiles, enrollment, replication
+and OID deletion need their own lab validation. No automatic merge or deployment is performed.
 
 Dependency tests cover loading PSPKI on demand, reusing a loaded module, preserving loader errors, and importing CoreCert.TemplateUtils without loading PSPKI.
 
@@ -451,3 +450,63 @@ Run `powershell.exe -NoProfile -File .\tests\Policy-Registration.Tests.ps1` for 
 context, conflict, metadata and replication-polling checks. Import control-flow tests also
 cover registration-before-commit, timeout aborts and WhatIf. Windows AD lab testing is still
 required for real PSPKI registration, replication, permissions and CertEnroll behavior.
+
+## Verification and reconciliation after creation
+
+Some schema-4 templates lose requested cryptography settings when CertEnroll commits
+an imported policy. After creating a template, the importer reads the stored LDAP
+attributes from the selected DC. It builds a bounded correction plan from the source
+XML, checks the complete projected result, applies the supported differences in one
+LDAP commit, then verifies the stored result again. This is part of the same import:
+`revision` and `msPKI-Template-Minor-Revision` are preserved. The existing update path
+retains its normal revision advancement rules.
+
+The plan supports flags, key spec/size, exact validity/renewal intervals, provider
+preference, RA/policy/EKU lists, certificate key usage and recognized cryptographic
+metadata. Unspecified, recognized metadata is preserved. Empty metadata values remove
+only their corresponding tuple. Packed cryptography corrections require schema3 or
+schema4 without `CT_FLAG_USE_LEGACY_PROVIDER`; unsupported legacy corrections stop.
+Contradictory extension/flag combinations, unknown metadata, schema changes and revision
+mismatches stop before the corrective write. Template GUID/OID identity is retained;
+ACLs are not migrated or changed by reconciliation.
+
+The corrective write binds to the template GUID and checks numeric `uSNChanged` and
+revision against its read baseline. ADSI LargeInteger values are converted exactly to
+Int64. This is an optimistic check, **not an atomic LDAP assertion or transaction**;
+a concurrent change between that check and the commit remains possible. Use a single
+writer during import. Failure does not delete the new template/OID, retry the write,
+or roll back prior changes. Inspect the saved state before deciding how to proceed.
+
+Exports now retain explicit RSA OIDs for schema3/4 while preserving the existing legacy
+schema1/2 representation. Optional/nil XML containers are read safely under StrictMode.
+
+Validated in a Windows AD lab: one new schema4 RSA2048/SHA256 template was created via
+the public importer, automatically reconciled, and exported again using actual PSPKI
+and AD objects. The export matched source settings and retained revision100.5; the
+trial remained unpublished. Additional field-reset combinations are covered by offline
+storage/LDAP doubles, not a claim of live coverage for every profile/provider/flag.
+
+Focused offline tests (no AD writes):
+
+```powershell
+powershell.exe -NoProfile -File .\tests\Algorithm-Fidelity.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Create-Reconciliation.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Strict-OptionalXml.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Reconciliation-Usn.Tests.ps1
+powershell.exe -NoProfile -File .\tests\Import-ControlFlow.Tests.ps1
+```
+
+The create test runs the real importer/control flow and final verifier with explicit
+COM-storage/LDAP-transport doubles. The USN test includes distinct objects with identical
+COM display strings, signed low32 values, Int64 boundaries and invalid values without
+StrictMode. Execution receipts and trial-object exports remain outside this module.
+Authorized, unchanged source XML examples are included separately under examples/templates.
+
+## Try one source template
+
+The [template examples guide](examples/templates/README.md) includes the unchanged
+ten-policy source export and one file per template. Start with its single WebServer
+example and review the WhatIf operation, target name and DC. The guide lists actual
+EKUs, key sizes, periods, providers and flags, including the CC-CepEncryption naming
+discrepancy. Only WebServer has live import/export coverage here. Template ACLs, CA
+publication and enrollment remain separate steps; do not publish the whole set blindly.

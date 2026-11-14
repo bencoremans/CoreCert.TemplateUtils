@@ -1,4 +1,4 @@
-﻿# Executes the importer's control flow with explicit AD/COM test doubles.
+# Executes the importer's control flow with explicit AD/COM test doubles.
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Export-Serialization.Tests.ps1')
 . (Join-Path $PSScriptRoot '../TemplateVerification.ps1')
@@ -29,6 +29,8 @@ try {
         Assert-Equal $TemplateBase 'CN=Certificate Templates,CN=Public Key Services,CN=Services,CN=Configuration,DC=forest,DC=test' 'Forest configuration context'
         if ($script:fail) { throw 'Verification failed (test double)' }
     }
+    # Dedicated reconciliation suite tests the real create verification path.
+    function Complete-TemplateCreateVerification { param($Expected,$Server,$TemplateBase); Assert-TemplateVerification $Expected $Server $TemplateBase }
     function New-Object {
         param([Parameter(Position=0)][string]$TypeName, [Parameter(Position=1)][object[]]$ArgumentList, [string]$ComObject)
         if ($TypeName -eq 'System.DirectoryServices.DirectorySearcher') {

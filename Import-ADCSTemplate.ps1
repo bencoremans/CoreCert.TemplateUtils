@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Imports certificate templates into Active Directory from an MS-XCEP XML string.
 
@@ -374,7 +374,7 @@ function Import-ADCSTemplate {
                     Write-Verbose "Template '$effectiveName' committed to AD via COM."
                 }
 
-                Assert-TemplateVerification $expected $Server $tplBase
+                Complete-TemplateCreateVerification $expected $Server $tplBase
                 Write-Output "Template '$effectiveName' imported and verified successfully."
             }
             } finally {

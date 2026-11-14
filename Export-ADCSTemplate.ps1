@@ -1,4 +1,4 @@
-﻿. (Join-Path $PSScriptRoot 'TemplatePolicyLibrary.ps1')
+. (Join-Path $PSScriptRoot 'TemplatePolicyLibrary.ps1')
 
 
 <#
@@ -185,7 +185,10 @@ function Export-ADCSTemplate {
             "<permissions>$(ConvertTo-XmlText $temp.templatePSPKI.Settings.Cryptography.PrivateKeySecuritySDDL)</permissions>"
         }
 
-        $KeyAlgorithm = if ($temp.templatePSPKI.Settings.Cryptography.KeyAlgorithm.Value -eq "1.2.840.113549.1.1.1") {
+        # Modern templates carry an explicit asymmetric algorithm. Do not erase
+        # a known RSA value; CertEnroll otherwise sees an empty property 18.
+        # Keep the established legacy representation for schema 1/2 templates.
+        $KeyAlgorithm = if ($temp.templatePSPKI.Settings.Cryptography.KeyAlgorithm.Value -eq "1.2.840.113549.1.1.1" -and [int]$temp.templatePSPKI.SchemaVersion -lt 3) {
             '<algorithmOIDReference xmlns:a="http://www.w3.org/2001/XMLSchema-instance" a:nil="true"/>'
         } else {
             $kalgID = Get-OIDid $temp.templatePSPKI.Settings.Cryptography.KeyAlgorithm $PublicKeyIdGroup
