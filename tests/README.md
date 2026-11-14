@@ -134,4 +134,25 @@ matching, malformed/schema-inconsistent metadata and group links. The optional r
 script defaults to Skip; it is not a policy cleanup API.
 ## Version 3.0 bundle tests
 
-Bundle-Format tests array shapes; Bundle-Contract tests the public API, automatic source registration export, absent-registration preservation, invalid envelopes and WhatIf/Confirm. Import-ControlFlow now invokes the actual importer through the public JSON wrapper. The older live results above remain baselines. The revised 3.0 runner passed all seventeen suites with actual PSPKI4.4 and no skipped dependencies. A live bundle with two templates and four custom registrations (two application, two issuance) passed public import, automatic registration creation, real export and identical no-op reimport. OID/type/name, object identity and revisions were retained. The first separately removed test template and its own OID passed guest postchecks, but a private caller output-array error paused cleanup before removing the second template. That unpublished template and four registrations remain; no complete 3.0 cleanup claim is made. No XML/sidecar public compatibility is retained.
+Bundle-Format tests array shapes; Bundle-Contract tests the public API, automatic source registration export, absent-registration preservation, invalid envelopes and WhatIf/Confirm. Import-ControlFlow invokes the actual importer through the public JSON wrapper. The older live results above remain baselines. The 3.0 runner passed all seventeen suites with actual PSPKI4.4 and no skipped dependencies. No XML/sidecar public compatibility is retained.
+
+A live bundle with two templates and four custom registrations (two application, two issuance) passed public import, automatic registration creation, real export and identical no-op reimport. OID/type/name, object identity and revisions were retained. Both templates and their exact owned template OIDs were separately removed; all four policy registrations were deliberately retained. A private caller output-array error interrupted cleanup after the first successful removal. The reviewed continuation removed only the remaining template, without repeating the first removal.
+
+Six additional JSON profiles passed actual import, real PSPKI/AD export comparison and separately selected removal:
+
+| Profile | Schema | Hash | Provider |
+| --- | --- | --- | --- |
+| RSA3072 | 3 | SHA384 | Microsoft Software Key Storage Provider |
+| RSA4096 | 4 | SHA512 | Microsoft Software Key Storage Provider |
+| ECDSA P256 | 4 | SHA256 | Microsoft Software Key Storage Provider |
+| ECDSA P384 | 3 | SHA384 | Microsoft Software Key Storage Provider |
+| ECDSA P521 | 4 | SHA512 | Microsoft Software Key Storage Provider |
+| RSA2048 legacy | 2 | No explicit modern hash metadata | Microsoft RSA SChannel Cryptographic Provider |
+
+The ECC profiles retained KeySpec0, signing-only CNG usage and DigitalSignature key usage. The schema2 profile used legacy metadata semantics. These are template storage/export results, not evidence of provider key generation or signing.
+
+The RSA3072 profile additionally retained RA signature count1, Certificate Request Agent application policy and a custom issuance policy. Its supported update changed enrollment flags to manager approval and validity/renewal to180/30 days, advanced revision100.5 to100.6, and preserved identity. Repeating that import left the numeric USN unchanged.
+
+Separate negative live calls refused an explicit revision downgrade, an unsupported hash update, an invalid second template in a bundle and conflicting policy-registration metadata. Each matched its predetermined error and preserved template identity/revision/USN, policy identities/USNs and directory object sets. WhatIf with a new template and absent policy registration created neither object. The CA publication list stayed empty throughout; no certificates were requested or issued.
+
+These results do not establish enrollment, provider key operation, TLS, revocation, multi-DC replication or arbitrary combinations of template settings.

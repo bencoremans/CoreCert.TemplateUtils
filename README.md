@@ -120,13 +120,19 @@ isolated suites with actual PSPKI4.4, plus a live two-template bundle import, au
 creation of two application and two issuance policy registrations, real multi-template
 export and no-op reimport. Numeric OIDs/types/names and revisions were preserved.
 
-During separately selected cleanup, the first template and its own OID were successfully
-removed, with all guest postchecks passing. A private test caller then rejected the public
-success message plus result object as an unexpected output array. The second template
-remains, unpublished, with the four policy registrations. Further cleanup is paused pending
-reviewed continuation. This is not a completed 3.0 cleanup-lifecycle claim; the module's
-previous complete removal proof remains separate.
+Both bundle templates and their exact owned template OIDs were subsequently removed in
+separate accepted steps. A private caller output-array error interrupted the first cleanup
+step after successful removal; its corrected continuation removed only the remaining
+template. All four policy registrations were deliberately retained.
+
+Six additional JSON profiles passed actual import, PSPKI/AD export comparison and separate
+removal: schema3 RSA3072/SHA384, schema4 RSA4096/SHA512, ECDSA P256/P384/P521,
+and schema2 RSA2048 with a legacy CSP. The modern profiles used an explicit Software KSP.
+The RSA3072 profile also exercised RA requirements, a supported flags/interval update with
+one minor revision increment, and repeat-import no-op. Expected downgrade, unsupported
+hash update, malformed second-template and registration-conflict refusals preserved AD
+state; WhatIf with an absent registration created nothing.
 
 Template import/export alone does not prove provider key operation, enrollment, TLS use,
 revocation, multi-DC replication or production suitability. A single-DC lab cannot prove
-replication. Broader crypto/field fixtures and enrollment require their own recorded results.
+replication. Untested combinations and enrollment require their own recorded results.
