@@ -92,8 +92,22 @@ separate cases before broader deployment claims.
 
 ## Evidence status
 
-The expanded offline run has eleven passing suites and two dependency skips on a host
-without pkix.net. The optional integration scripts have only been parsed and exercised
-in their default Skip mode here. Previously, one schema4 WebServer profile completed a
-real import/reconciliation/export without publication. That does not cover these new
-lifecycle, replication or enrollment acceptance cases.
+The initial expanded offline run had eleven passing suites and two dependency skips on
+its host. Both dependency suites subsequently passed on Windows PowerShell5.1 with
+real PSPKI4.4/pkix.net. A JSON sidecar regression now covers one- and multiple-entry
+arrays on PowerShell5.1; consumers must assign ConvertFrom-Json output directly.
+
+The opt-in WebServer lifecycle Create/export and Update/no-op phases passed live:
+one minor revision increment, unchanged GUID/OID, and no write on the identical second
+import. The template remained unpublished. The first Remove phase exposed an ADSI
+adapter issue: Parent resolved to a string rather than the .NET DirectoryEntry.
+The correction explicitly uses PSBase.Parent/Children/Dispose. Focused regressions cover
+both adapted-parent lookup and member lookup after deletion. After a separate controlled
+cleanup of the owned unused registration, a fresh public Create/export followed by the
+public Remove passed live: both the new template and its exact owned template OID were
+removed, the other OID registrations were unchanged, and the CA list remained empty.
+The historical failed attempts remain failures; the fresh pass proves the corrected path.
+Application/issuance-policy registration removal is not part of this proof.
+Other example profiles, custom-policy registration in AD, replication and enrollment
+have not yet passed these live cases. Serialization tests do not prove provider or
+certificate-enrollment behavior. No broad deployment readiness is claimed.

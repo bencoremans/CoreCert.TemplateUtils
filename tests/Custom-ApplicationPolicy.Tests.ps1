@@ -8,7 +8,8 @@ $doc=Read-TemplatePolicyDocument ([IO.File]::ReadAllText((Join-Path $PSScriptRoo
 $policy=$doc.GetPoliciesResponse.response.policies.policy;Assert-TemplatePolicyInput $doc $policy
 $expect=Get-TemplateXmlExpectation $doc $policy 'Example custom application policy'
 if(($expect.pKIExtendedKeyUsage -join ',') -cne '1.3.6.1.5.5.7.3.1' -or ($expect['msPKI-Certificate-Application-Policy'] -join ',') -cne '1.2.3.4'){throw 'Custom application policy was conflated with EKU'}
-$registration=@(Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.registrations.json') -Raw|ConvertFrom-Json)
+$registration=Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.registrations.json') -Raw|ConvertFrom-Json
+if($registration[0] -is [array]){throw 'Registration JSON must yield flat objects, not a nested array'}
 $context=[pscustomobject]@{Server='dc.example.test';ConfigurationNamingContext='CN=Configuration,DC=example,DC=test';OidBase='CN=OID,DC=example,DC=test'}
 function Get-TemplateImplicitConfiguration { 'CN=Configuration,DC=example,DC=test' }
 function Find-TemplateDirectoryObject {@()}

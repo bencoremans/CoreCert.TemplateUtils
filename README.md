@@ -411,7 +411,7 @@ $registrations = @(Export-ADCSTemplatePolicyRegistration -XmlString $xml -Server
 ConvertTo-Json -InputObject $registrations -Depth 4 | Set-Content '.\templates.policies.json' -Encoding UTF8
 
 # Destination forest, in a fresh PowerShell session with a stable execution identity:
-$registrations = @(Get-Content '.\templates.policies.json' -Raw | ConvertFrom-Json)
+$registrations = Get-Content '.\templates.policies.json' -Raw | ConvertFrom-Json
 Import-ADCSTemplate -XmlString $xml -Server 'dc.target.example' `
     -PolicyRegistrations $registrations -PolicyRegistrationTimeoutSeconds 120 -WhatIf
 # Remove -WhatIf after reviewing the planned actions.

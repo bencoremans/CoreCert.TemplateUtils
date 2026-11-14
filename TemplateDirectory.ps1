@@ -1,4 +1,4 @@
-﻿# Shared directory boundaries; public commands use literal names on a pinned DC.
+# Shared directory boundaries; public commands use literal names on a pinned DC.
 function Get-TemplateDirectoryContext {
     param([string]$Server)
     if (-not $Server) {
@@ -39,9 +39,9 @@ function Remove-TemplateDirectoryObject {
     param([string]$Path)
     $entry=[DirectoryServices.DirectoryEntry]::new($Path)
     try {
-        $parent=$entry.Parent
-        try { $parent.Children.Remove($entry) } finally { $parent.Dispose() }
-    } finally { $entry.Dispose() }
+        $parent=$entry.PSBase.Parent
+        try { $parent.PSBase.Children.Remove($entry) } finally { $parent.PSBase.Dispose() }
+    } finally { $entry.PSBase.Dispose() }
 }
 function Get-TemplateOidRemovalCandidate {
     param([string]$Oid, [object[]]$Registrations, [object[]]$References, [string]$TemplatePath)

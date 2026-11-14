@@ -47,7 +47,8 @@ foreach($policy in $policies){
 # A complete custom-policy companion is structural coverage even without pkix.net.
 $custom=Read-TemplatePolicyDocument ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.xcep.xml')))
 Assert-TemplatePolicyInput $custom $custom.GetPoliciesResponse.response.policies.policy
-$registration=@(Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.registrations.json') -Raw|ConvertFrom-Json)
+$registration=Get-Content (Join-Path $PSScriptRoot 'fixtures/CustomApplicationPolicy.registrations.json') -Raw|ConvertFrom-Json
+if($registration[0] -is [array]){throw 'Registration JSON must yield flat objects, not a nested array'}
 Assert-True ($registration.Count -eq 1 -and $registration[0].Oid -ceq '1.2.3.4' -and $registration[0].OidGroup -ceq 'ApplicationPolicy' -and -not [string]::IsNullOrWhiteSpace($registration[0].FriendlyName)) 'Custom fixture companion incomplete'
 $oidMap=@{};foreach($oid in $custom.GetPoliciesResponse.oIDs.oID){$oidMap[[string]$oid.oIDReferenceID]=[string]$oid.value}
 $app=@($custom.GetPoliciesResponse.response.policies.policy.attributes.extensions.extension|Where-Object{$oidMap[[string]$_.oIDReference] -ceq '1.3.6.1.4.1.311.21.10'})

@@ -20,7 +20,7 @@ try{
   Assert-TemplatePolicyInput $inputDoc $inputPolicies[0]
  }
  if($PolicyRegistrationsPath){
-  $registrations=@(Get-Content $PolicyRegistrationsPath -Raw|ConvertFrom-Json)
+  $registrations=Get-Content $PolicyRegistrationsPath -Raw|ConvertFrom-Json
   if($Phase -in @('Create','Update') -and @($registrations|Where-Object {$_.Oid -eq '1.2.3.4'}).Count){throw 'Replace offline placeholder OID with your own authorized test OID/metadata before live registration'}
  }
  if($Phase -eq 'PolicyExport' -and -not $PolicyRegistrationsPath){throw 'PolicyExport requires expected registration sidecar metadata'}
@@ -48,7 +48,7 @@ try{
   if(-not $DisplayName){$DisplayName=$Name}
   if($Phase -eq 'Update' -and $before[0].displayName -ceq $DisplayName){throw 'Choose a different display name to exercise an update'}
   $arguments=@{XmlString=$xml;Name=$Name;DisplayName=$DisplayName;Server=$Server}
-  if($PolicyRegistrationsPath){$arguments.PolicyRegistrations=@(Get-Content $PolicyRegistrationsPath -Raw|ConvertFrom-Json)}
+  if($PolicyRegistrationsPath){$arguments.PolicyRegistrations=$registrations}
   if($Phase -in @('Create','Update')){$r.Calls++;Import-ADCSTemplate @arguments|Out-Null}
   $actual=Read-TemplateVerificationState $Server (Get-TemplateDirectoryContext $Server).TemplateBase $Name
   if($Phase -ne 'Create' -and ([guid]::new([byte[]]$actual.objectGUID) -ne $ExpectedObjectGuid -or $actual['msPKI-Cert-Template-OID'] -cne $ExpectedTemplateOid)){throw 'Template GUID/OID changed during operation'}
