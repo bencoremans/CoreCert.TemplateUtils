@@ -1,9 +1,9 @@
 @{
     RootModule        = 'CoreCert.TemplateUtils.psm1'
-    ModuleVersion     = '2.2.0'
+    ModuleVersion     = '3.0.0'
     GUID              = 'c8e82f8d-13d2-4a1d-91b3-24ff8b01827d'
     Author            = 'Ben Coremans'
-    Description       = 'PowerShell module for managing AD CS certificate templates: export to portable XML, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required for import/update operations.'
+    Description       = 'PowerShell module for managing AD CS certificate templates: export to versioned JSON bundles, idempotent import/update, multi-tenant name override, and cleanup — no AD module dependency required for import/update operations.'
     FunctionsToExport = @(
         'Export-ADCSTemplate',
         'Get-ADCSTemplate',
@@ -17,6 +17,11 @@
         'Export-ADCSTemplate.ps1',
         'Get-ADCSTemplate.ps1',
         'Import-ADCSTemplate.ps1',
+        'TemplateVerification.ps1',
+        'TemplatePolicyLibrary.ps1',
+        'TemplatePolicyRegistration.ps1',
+        'TemplateDirectory.ps1',
+        'TemplateBundle.ps1',
         'Remove-ADCSTemplate.ps1',
         'README.md'
     )
@@ -29,6 +34,20 @@
             Tags         = @('PKI', 'ADCS', 'CertificateTemplates', 'ActiveDirectory', 'CoreCert')
             ProjectUri   = ''
             ReleaseNotes = @'
+## 3.0.0
+- Breaking: import/export use a single versioned JSON bundle containing internal XML and policy registrations.
+- Automatically export policy registration metadata and create missing registrations before templates.
+- Standalone XML import and separate policy-registration export are no longer public APIs.
+
+## 2.3.0
+- Validate exports and MS-XCEP input; preserve exact intervals and UTF-8 text.
+- Verify supported settings against fresh same-DC LDAP after import/update/no-op.
+- Escape LDAP names and use forest configuration context consistently.
+- Resolve owned OID registrations before removal; report partial failures accurately.
+- Update displayName and advance revision for content changes without downgrades.
+- Reject unsupported update differences before changing that template.
+- Offline regression tests included; Windows AD/CertEnroll lab validation required.
+
 ## 2.2.0
 - Import-ADCSTemplate update path now compares all XCEP-representable attributes:
   8 integer flags + binary period fields (validity/renewal) + version.
@@ -50,3 +69,4 @@
         }
     }
 }
+
